@@ -43,17 +43,18 @@ import "../Math/Math.sol";
 import "./IGaugeController.sol";
 import "./IGaugeRewardsDistributor.sol";
 import "../ERC20/IERC20.sol";
-import "../ERC20/SafeERC20.sol";
+// import "../ERC20/SafeERC20.sol";
 import "../Common/ReentrancyGuard.sol";
 import "../Common/TimelockOwned.sol";
 import "./IStakingTreasury.sol";
+import "../Libs/TransferHelper.sol";
 
 interface IERC20Decimals {
     function decimals() external view returns (uint8);
 }
 
 contract StakingRewardComptroller is TimelockOwned, ReentrancyGuard {
-    using SafeERC20 for IERC20;
+    // using SafeERC20 for IERC20;
 
     /* ========== STATE VARIABLES ========== */
 
@@ -324,7 +325,8 @@ contract StakingRewardComptroller is TimelockOwned, ReentrancyGuard {
             rewards_before[i] = rewards[rewardee][i];
             rewards[rewardee][i] = 0;
             rewardClaimed[i] += rewards_before[i];
-            IERC20(rewardTokens[i]).safeTransfer(destination_address, rewards_before[i]);
+            TransferHelper.safeTransfer(rewardTokens[i], destination_address, rewards_before[i]);
+            // IERC20(rewardTokens[i]).safeTransfer(destination_address, rewards_before[i]);
         }
 
         // Handle additional reward logic
@@ -452,13 +454,15 @@ contract StakingRewardComptroller is TimelockOwned, ReentrancyGuard {
 
         // Only the reward managers can take back their reward tokens
         if (isRewardToken && rewardManagers[tokenAddress] == msg.sender){
-            IERC20(tokenAddress).safeTransfer(msg.sender, tokenAmount);
+            // IERC20(tokenAddress).safeTransfer(msg.sender, tokenAmount);
+            TransferHelper.safeTransfer(tokenAddress, msg.sender, tokenAmount);
             return;
         }
 
         // Other tokens, like the staking token, airdrops, or accidental deposits, can be withdrawn by the owner
         else if (!isRewardToken && (msg.sender == owner)){
-            IERC20(tokenAddress).safeTransfer(msg.sender, tokenAmount);
+            // IERC20(tokenAddress).safeTransfer(msg.sender, tokenAmount);
+            TransferHelper.safeTransfer(tokenAddress, msg.sender, tokenAmount);
             return;
         }
 

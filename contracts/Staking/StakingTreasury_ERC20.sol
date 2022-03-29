@@ -4,7 +4,7 @@ pragma solidity ^0.8.0;
 import "../Common/Context.sol";
 import "../Common/TimelockOwned.sol";
 import "../Math/Math.sol";
-import "../ERC20/IERC20.sol";
+// import "../ERC20/IERC20.sol";
 import "../ERC20/SafeERC20.sol";
 import "../Common/ReentrancyGuard.sol";
 import "../Libs/TransferHelper.sol";
@@ -21,7 +21,7 @@ interface IRewardComptroller {
 }
 
 abstract contract StakingTreasury_ERC20 is Context, TimelockOwned, ReentrancyGuard {
-    using SafeERC20 for IERC20;
+    // using SafeERC20 for IERC20;
 
     // Constant for various precisions
     uint256 public constant MULTIPLIER_PRECISION = 1e18;
@@ -323,7 +323,7 @@ abstract contract StakingTreasury_ERC20 is Context, TimelockOwned, ReentrancyGua
         uint256 new_amt = thisStake.liquidity + addl_liq;
 
         // Pull the tokens from the sender
-        IERC20(lp_token_address).safeTransferFrom(msg.sender, address(this), addl_liq);
+        TransferHelper.safeTransferFrom(lp_token_address, msg.sender, address(this), addl_liq);
 
         // Update the stake
         lockedStakes[msg.sender][theArrayIndex] = LockedStake(
@@ -366,7 +366,8 @@ abstract contract StakingTreasury_ERC20 is Context, TimelockOwned, ReentrancyGua
 
         // Pull in the required token(s)
         // Varies per farm
-        IERC20(lp_token_address).safeTransferFrom(source_address, address(this), liquidity);
+        // IERC20(lp_token_address).safeTransferFrom(source_address, address(this), liquidity);
+        TransferHelper.safeTransferFrom(lp_token_address, source_address, address(this), liquidity);
 
         // Create the locked stake
         lockedStakes[staker_address].push(LockedStake(
@@ -430,7 +431,8 @@ abstract contract StakingTreasury_ERC20 is Context, TimelockOwned, ReentrancyGua
 
             // Give the tokens to the destination_address
             // Should throw if insufficient balance
-            IERC20(lp_token_address).safeTransfer(destination_address, liquidity);
+            // IERC20(lp_token_address).safeTransfer(destination_address, liquidity);
+            TransferHelper.safeTransfer(lp_token_address, destination_address, liquidity);
 
             // Need to call again to make sure everything is correct
             reward_comptroller.updateRewardAndBalance(staker_address, false);
