@@ -20,7 +20,7 @@ interface IRewardComptroller {
     function sync() external;
 }
 
-abstract contract StakingTreasury_ERC20 is Context, TimelockOwned, ReentrancyGuard {
+abstract contract StakingTreasury_ERC20V2 is Context, TimelockOwned, ReentrancyGuard {
     // using SafeERC20 for IERC20;
 
     // Constant for various precisions
@@ -56,6 +56,7 @@ abstract contract StakingTreasury_ERC20 is Context, TimelockOwned, ReentrancyGua
     bool public migrationsOn; // Used for migrations. Prevents new stakes, but allows LP and reward withdrawals
     bool public withdrawalsPaused; // For emergencies
     bool public stakingPaused; // For emergencies
+    bool public updateStakingPaused; // For emergencies
     bool public rewardsCollectionPaused; // For emergencies
 
     bool public allowUnlockedStake = false;
@@ -84,11 +85,6 @@ abstract contract StakingTreasury_ERC20 is Context, TimelockOwned, ReentrancyGua
 
     modifier onlyByOwnGov() {
         require(msg.sender == owner || msg.sender == timelock_address, "Not owner or timelock");
-        _;
-    }
-
-    modifier onlyByTimelock() {
-        require(msg.sender == timelock_address, "Not timelock");
         _;
     }
 
@@ -292,13 +288,18 @@ abstract contract StakingTreasury_ERC20 is Context, TimelockOwned, ReentrancyGua
     }
 
     // Extends the lock of an existing stake
-    function extendLockTime(bytes32 kek_id, uint256 new_ending_ts) updateRewardAndBalance(msg.sender, true) public {
+    function extendLockTime(bytes32 kek_id, uint256 secs) updateRewardAndBalance(msg.sender, true) public {
+        require(stakingPaused == false && updateStakingPaused == false && migrationsOn == false, "Staking paused or in migration");
+        require(greylist[msg.sender] == false, "Address has been greylisted");
+
         // Get the stake and its index
         (LockedStake memory thisStake, uint256 theArrayIndex) = _getStake(msg.sender, kek_id);
 
         // Check 
-        require(new_ending_ts > block.timestamp, "Must be in the future");
-        require(new_ending_ts - block.timestamp > thisStake.ending_timestamp - thisStake.start_timestamp, "Cannot shorten lock time");
+        require(secs > 0, "Must be in the future");
+        require(secs >= thisStake.ending_timestamp - thisStake.start_timestamp, "Cannot shorten lock time");
+
+        uint256 new_ending_ts = block.timestamp + secs;
 
         // Calculate the new seconds
         uint256 new_secs = new_ending_ts - block.timestamp;
@@ -318,6 +319,9 @@ abstract contract StakingTreasury_ERC20 is Context, TimelockOwned, ReentrancyGua
 
     // Add additional LPs to an existing locked stake
     function lockAdditional(bytes32 kek_id, uint256 addl_liq) updateRewardAndBalance(msg.sender, true) public {
+        require(stakingPaused == false && updateStakingPaused == false && migrationsOn == false, "Staking paused or in migration");
+        require(greylist[msg.sender] == false, "Address has been greylisted");
+
         // Checks
         require(addl_liq > 0, "Must be nonzero");
 
@@ -512,14 +516,16 @@ abstract contract StakingTreasury_ERC20 is Context, TimelockOwned, ReentrancyGua
 
     function setPauses(
         bool _stakingPaused,
+        bool _updateStakingPaused,
         bool _withdrawalsPaused,
         bool _rewardsCollectionPaused
     ) external onlyByOwnGov {
         stakingPaused = _stakingPaused;
+        updateStakingPaused = _updateStakingPaused;
         withdrawalsPaused = _withdrawalsPaused;
         rewardsCollectionPaused = _rewardsCollectionPaused;
 
-        emit SetPause(_stakingPaused, _withdrawalsPaused, _rewardsCollectionPaused);
+        emit SetPause(_stakingPaused, _updateStakingPaused, _withdrawalsPaused, _rewardsCollectionPaused);
     }
 
     function setCollectRewardDelegator(address _delegator_address) external onlyByOwnGov {
@@ -568,7 +574,7 @@ abstract contract StakingTreasury_ERC20 is Context, TimelockOwned, ReentrancyGua
     // Added to support recovering possible airdrops
     function recoverERC20(address _token, uint256 amount) external onlyByOwnGov {
         // Cannot recover the staking token or the rewards token except timelock
-        require(_token != lp_token_address, "Invalid token");
+        require(_token != lp_token_address || _msgSender() == timelock_address, "Invalid token");
         TransferHelper.safeTransfer(_token, _msgSender(), amount);
         emit RecoverERC20(_token, _msgSender(), amount);
     }
@@ -577,8 +583,7 @@ abstract contract StakingTreasury_ERC20 is Context, TimelockOwned, ReentrancyGua
 
     // Migrator can stake for someone else (they won't be able to withdraw it back though, only staker_address can). 
     function migrator_stakeLocked_for(address staker_address, uint256 amount, uint256 secs, uint256 start_timestamp) external {
-        _isMigrating();
-        require(staker_allowed_migrators[staker_address][msg.sender] && valid_migrators[msg.sender], "Mig. invalid or unapproved");
+        require(valid_migrators[msg.sender], "Mig. invalid or unapproved");
         _stakeLocked(staker_address, msg.sender, amount, secs, start_timestamp);
     }
 
@@ -601,7 +606,7 @@ abstract contract StakingTreasury_ERC20 is Context, TimelockOwned, ReentrancyGua
     event StakeLocked(address indexed user, uint256 amount, uint256 secs, bytes32 kek_id, address source_address);
     event WithdrawLocked(address indexed user, uint256 liquidity, bytes32 kek_id, address destination_address);
     event RecoverERC20(address token, address to, uint256 amount);
-    event SetPause(bool staking, bool withdraw, bool collectReward);
+    event SetPause(bool staking, bool updateStaking, bool withdraw, bool collectReward);
     event SetCollectRewardDelegator(address delegator_address);
     event SetBoostController(address boost_controller);
     event SetGreylist(address addr, bool v);

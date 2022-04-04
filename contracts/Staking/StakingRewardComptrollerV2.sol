@@ -53,7 +53,7 @@ interface IERC20Decimals {
     function decimals() external view returns (uint8);
 }
 
-contract StakingRewardComptroller is TimelockOwned, ReentrancyGuard {
+contract StakingRewardComptrollerV2 is TimelockOwned, ReentrancyGuard {
     // using SafeERC20 for IERC20;
 
     /* ========== STATE VARIABLES ========== */
@@ -103,14 +103,23 @@ contract StakingRewardComptroller is TimelockOwned, ReentrancyGuard {
     uint256 internal _total_combined_weight;
     mapping(address => uint256) internal _combined_weights;
 
-    /* ========== STRUCTS ========== */
-    // In children...
-
+    // List of valid migrators (set by governance)
+    mapping(address => bool) public valid_migrators;
 
     /* ========== MODIFIERS ========== */
 
     function _onlyTknMgrs(address reward_token_address) internal view {
         require(msg.sender == owner || isTokenManagerFor(msg.sender, reward_token_address), "Not owner or tkn mgr");
+    }
+
+    modifier onlyByOwnGov() {
+        require(msg.sender == owner || msg.sender == timelock_address, "Not owner or timelock");
+        _;
+    }
+
+    modifier onlyValidMigrator() {
+        require(valid_migrators[msg.sender], "Not valid migrator");
+        _;
     }
 
     /* ========== CONSTRUCTOR ========== */
@@ -219,16 +228,9 @@ contract StakingRewardComptroller is TimelockOwned, ReentrancyGuard {
         uint256[] memory reward_arr = rewardsPerWeight();
         new_earned = new uint256[](rewardTokens.length);
 
-        if (_combined_weights[account] == 0){
-            for (uint256 i = 0; i < rewardTokens.length; i++){ 
-                new_earned[i] = 0;
-            }
-        }
-        else {
-            for (uint256 i = 0; i < rewardTokens.length; i++){ 
-                new_earned[i] = ((combined_weight * (reward_arr[i] - userRewardsPerTokenPaid[account][i])) / 1e18)
-                                + rewards[account][i];
-            }
+        for (uint256 i = 0; i < rewardTokens.length; i++){ 
+            new_earned[i] = ((combined_weight * (reward_arr[i] - userRewardsPerTokenPaid[account][i])) / 1e18)
+                            + rewards[account][i];
         }
     }
 
@@ -503,6 +505,24 @@ contract StakingRewardComptroller is TimelockOwned, ReentrancyGuard {
        }
        return string(_string);
     }
+
+    // ------ MIGRATION ------
+
+    // Adds supported migrator address
+    function setMigrator(address migrator_address, bool v) external onlyByOwnGov {
+        valid_migrators[migrator_address] = v;
+
+        emit SetMigrator(migrator_address, valid_migrators[migrator_address]);
+    }
+
+    function migrate_earned(address _account, uint256[] calldata earned_arr) external onlyValidMigrator {
+        for (uint256 i = 0; i < earned_arr.length; i++){ 
+            rewards[_account][i] += earned_arr[i];
+        }
+    }
+
+    /* ========== EVENTS ========== */
+    event SetMigrator(address migrator_address, bool v);
 
     /* ========== A CHICKEN ========== */
     //

@@ -103,12 +103,11 @@ contract StakingBoostController is TimelockOwned {
         // Select the higher of the two
         vekrome_multiplier = mult_op_1 > mult_op_2 ? mult_op_1 : mult_op_2;
         stay_time = vekrome_multiplier > 0 && vekrome_multiplier > vekrome_max_multiplier ? ((vekrome_multiplier - vekrome_max_multiplier) * lock_time) / vekrome_multiplier : 0;
-        dtime = lock_time - stay_time;
+        dtime = lock_time > stay_time ? lock_time - stay_time : 0;
         dslope = dtime > 0 ? vekrome_multiplier / dtime : 0;
 
         // Cap the boost to the vekrome_max_multiplier
         if (vekrome_multiplier > vekrome_max_multiplier) vekrome_multiplier = vekrome_max_multiplier;
-
     }
 
     /* =============== MUTATIVE FUNCTIONS =============== */

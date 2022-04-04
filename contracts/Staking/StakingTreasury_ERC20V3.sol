@@ -20,7 +20,7 @@ interface IRewardComptroller {
     function sync() external;
 }
 
-abstract contract StakingTreasury_ERC20R1 is Context, TimelockOwned, ReentrancyGuard {
+abstract contract StakingTreasury_ERC20V3 is Context, TimelockOwned, ReentrancyGuard {
     // using SafeERC20 for IERC20;
 
     // Constant for various precisions
@@ -39,7 +39,7 @@ abstract contract StakingTreasury_ERC20R1 is Context, TimelockOwned, ReentrancyG
     // Stake tracking
     mapping(address => LockedStake[]) public lockedStakes;
     mapping(address => uint256) public _locked_liquidity;
-    mapping(address => VeKromeMultiplier) public veMultipliers;
+    // mapping(address => VeKromeMultiplier) public veMultipliers;
     uint256 internal _total_liquidity_locked;
 
     // Greylists
@@ -56,6 +56,7 @@ abstract contract StakingTreasury_ERC20R1 is Context, TimelockOwned, ReentrancyG
     bool public migrationsOn; // Used for migrations. Prevents new stakes, but allows LP and reward withdrawals
     bool public withdrawalsPaused; // For emergencies
     bool public stakingPaused; // For emergencies
+    bool public updateStakingPaused; // For emergencies
     bool public rewardsCollectionPaused; // For emergencies
 
     bool public allowUnlockedStake = false;
@@ -84,11 +85,6 @@ abstract contract StakingTreasury_ERC20R1 is Context, TimelockOwned, ReentrancyG
 
     modifier onlyByOwnGov() {
         require(msg.sender == owner || msg.sender == timelock_address, "Not owner or timelock");
-        _;
-    }
-
-    modifier onlyByTimelock() {
-        require(msg.sender == timelock_address, "Not timelock");
         _;
     }
 
@@ -127,97 +123,6 @@ abstract contract StakingTreasury_ERC20R1 is Context, TimelockOwned, ReentrancyG
     /* ============= VIEWS ============= */
 
     // ------ LIQUIDITY AND WEIGHTS ------
-
-    // Calculated the combined weight for an account
-    function calcCurCombinedWeight(address account) public view returns (
-        uint256 avg_combined_weight, // average between checkpointed time and now, to calculate earnings
-        uint256 cur_combined_weight  // current value, to track total combined weight
-    ) {
-        VeKromeMultiplier memory veMultiplier = veMultipliers[account];
-
-        uint256 checkpoint_time = veMultiplier.timestamp;
-
-        // Loop through the locked stakes, first by getting the liquidity * lock_multiplier portion
-        for (uint256 i = 0; i < lockedStakes[account].length; i++) {
-            LockedStake memory thisStake = lockedStakes[account][i];
-
-            uint256 lock_multiplier = thisStake.lock_multiplier;
-
-            uint256 avg_boost_multiplier;
-            uint256 cur_boost_multiplier;
-            if (thisStake.ending_timestamp > block.timestamp) { // If not expired
-                (uint256 avg_ve_multiplier, uint256 cur_ve_multiplier) = _calc_ve_multiplier(Math.max(thisStake.start_timestamp, checkpoint_time), block.timestamp, veMultiplier);
-
-                avg_boost_multiplier = lock_multiplier + avg_ve_multiplier;
-                cur_boost_multiplier = lock_multiplier + cur_ve_multiplier;
-            } else if (thisStake.ending_timestamp > checkpoint_time) { // If the lock is expired within period
-                (uint256 avg_ve_multiplier, ) = _calc_ve_multiplier(Math.max(thisStake.start_timestamp, checkpoint_time), thisStake.ending_timestamp, veMultiplier);
-
-                uint256 time_before_expiry = thisStake.ending_timestamp - checkpoint_time;
-                uint256 time_after_expiry = block.timestamp - thisStake.ending_timestamp;
-
-                // Get the weighted-average multiplier
-                uint256 numerator = ((lock_multiplier + avg_ve_multiplier) * time_before_expiry) + (MULTIPLIER_PRECISION * time_after_expiry);
-                avg_boost_multiplier = numerator / (time_before_expiry + time_after_expiry);
-                cur_boost_multiplier = MULTIPLIER_PRECISION;
-            } else { // Otherwise, it needs to just be 1x
-                avg_boost_multiplier = MULTIPLIER_PRECISION;
-                cur_boost_multiplier = MULTIPLIER_PRECISION;
-            }
-
-            uint256 liquidity = thisStake.liquidity;
-            avg_combined_weight += ((liquidity * avg_boost_multiplier) / MULTIPLIER_PRECISION);
-            cur_combined_weight += ((liquidity * cur_boost_multiplier) / MULTIPLIER_PRECISION);
-        }
-    }
-
-    function _calc_ve_multiplier(uint256 stake_start, uint256 end_time, VeKromeMultiplier memory ve) internal pure returns (uint256 avg_ve_multiplier, uint256 cur_ve_multiplier) {
-        // total time
-        uint256 total_period = end_time - ve.timestamp;
-        // time before stake
-        uint256 btime = stake_start <= ve.timestamp ? 0 : stake_start - ve.timestamp;
-        uint256 period = total_period - btime;
-
-        // available time to decrease
-        uint256 vtime = total_period > ve.staytime ? total_period - ve.staytime : 0;
-        uint256 rdtime = ve.dslope > 0 ? ve.multiplier / ve.dslope : 0;
-        // real time that decrease happened
-        uint256 dtime = Math.min(rdtime, vtime);
-        uint256 ve_multiplier_decrease = ve.dslope * dtime;
-        
-        cur_ve_multiplier = ((ve_multiplier_decrease > 0 && rdtime > 0 && vtime >= rdtime) || ve_multiplier_decrease >= ve.multiplier) ? 0 : (ve.multiplier - ve_multiplier_decrease);
-
-        uint256 ve_multiplier_0 = ve.multiplier;
-        uint256 staytime = ve.staytime;
-        if (btime > 0) {
-            // ve_multiplier on period start
-            uint256 bvtime = btime > ve.staytime ? btime - ve.staytime : 0;
-            uint256 bdtime = Math.min(dtime, bvtime);
-            uint256 bve_multiplier_decrease = ve.dslope * dtime;
-            ve_multiplier_0 = (bve_multiplier_decrease > 0 && bvtime >= bdtime) || bve_multiplier_decrease >= ve.multiplier ? 0 : ve.multiplier - bve_multiplier_decrease;
-
-            dtime -= bdtime;
-            staytime -= Math.min(btime, staytime);
-        }
-
-        // period = dtime + staytime + (time that multiplier is 0)
-        avg_ve_multiplier = period > 0 ? (((ve_multiplier_0 + cur_ve_multiplier) / 2) * dtime + ve.multiplier * staytime) / period : cur_ve_multiplier;
-    }
-
-    function calcCurCombinedWeightWrite(address account) external returns (uint256 new_combined_weight)
-    {
-        require(address(reward_comptroller) != address(0) && msg.sender == address(reward_comptroller), "Only reward comptroller can perform this action");
-
-        (uint256 ve_multiplier, uint256 dslope, uint256 staytime) = boost_controller.veKromeMultiplier(account, usdkForStake(_locked_liquidity[account]));
-        veMultipliers[account] = VeKromeMultiplier(
-            ve_multiplier,
-            dslope,
-            staytime,
-            block.timestamp
-        );
-
-        (, new_combined_weight) = calcCurCombinedWeight(account);
-    }
 
     // ------ LOCK RELATED ------
 
@@ -292,13 +197,18 @@ abstract contract StakingTreasury_ERC20R1 is Context, TimelockOwned, ReentrancyG
     }
 
     // Extends the lock of an existing stake
-    function extendLockTime(bytes32 kek_id, uint256 new_ending_ts) updateRewardAndBalance(msg.sender, true) public {
+    function extendLockTime(bytes32 kek_id, uint256 secs) updateRewardAndBalance(msg.sender, true) public {
+        require(stakingPaused == false && updateStakingPaused == false && migrationsOn == false, "Staking paused or in migration");
+        require(greylist[msg.sender] == false, "Address has been greylisted");
+
         // Get the stake and its index
         (LockedStake memory thisStake, uint256 theArrayIndex) = _getStake(msg.sender, kek_id);
 
         // Check 
-        require(new_ending_ts > block.timestamp, "Must be in the future");
-        require(new_ending_ts - block.timestamp > thisStake.ending_timestamp - thisStake.start_timestamp, "Cannot shorten lock time");
+        require(secs > 0, "Must be in the future");
+        require(secs >= thisStake.ending_timestamp - thisStake.start_timestamp, "Cannot shorten lock time");
+
+        uint256 new_ending_ts = block.timestamp + secs;
 
         // Calculate the new seconds
         uint256 new_secs = new_ending_ts - block.timestamp;
@@ -318,6 +228,9 @@ abstract contract StakingTreasury_ERC20R1 is Context, TimelockOwned, ReentrancyG
 
     // Add additional LPs to an existing locked stake
     function lockAdditional(bytes32 kek_id, uint256 addl_liq) updateRewardAndBalance(msg.sender, true) public {
+        require(stakingPaused == false && updateStakingPaused == false && migrationsOn == false, "Staking paused or in migration");
+        require(greylist[msg.sender] == false, "Address has been greylisted");
+
         // Checks
         require(addl_liq > 0, "Must be nonzero");
 
@@ -512,14 +425,16 @@ abstract contract StakingTreasury_ERC20R1 is Context, TimelockOwned, ReentrancyG
 
     function setPauses(
         bool _stakingPaused,
+        bool _updateStakingPaused,
         bool _withdrawalsPaused,
         bool _rewardsCollectionPaused
     ) external onlyByOwnGov {
         stakingPaused = _stakingPaused;
+        updateStakingPaused = _updateStakingPaused;
         withdrawalsPaused = _withdrawalsPaused;
         rewardsCollectionPaused = _rewardsCollectionPaused;
 
-        emit SetPause(_stakingPaused, _withdrawalsPaused, _rewardsCollectionPaused);
+        emit SetPause(_stakingPaused, _updateStakingPaused, _withdrawalsPaused, _rewardsCollectionPaused);
     }
 
     function setCollectRewardDelegator(address _delegator_address) external onlyByOwnGov {
@@ -568,7 +483,7 @@ abstract contract StakingTreasury_ERC20R1 is Context, TimelockOwned, ReentrancyG
     // Added to support recovering possible airdrops
     function recoverERC20(address _token, uint256 amount) external onlyByOwnGov {
         // Cannot recover the staking token or the rewards token except timelock
-        require(_token != lp_token_address, "Invalid token");
+        require(_token != lp_token_address || _msgSender() == timelock_address, "Invalid token");
         TransferHelper.safeTransfer(_token, _msgSender(), amount);
         emit RecoverERC20(_token, _msgSender(), amount);
     }
@@ -577,8 +492,7 @@ abstract contract StakingTreasury_ERC20R1 is Context, TimelockOwned, ReentrancyG
 
     // Migrator can stake for someone else (they won't be able to withdraw it back though, only staker_address can). 
     function migrator_stakeLocked_for(address staker_address, uint256 amount, uint256 secs, uint256 start_timestamp) external {
-        _isMigrating();
-        require(staker_allowed_migrators[staker_address][msg.sender] && valid_migrators[msg.sender], "Mig. invalid or unapproved");
+        require(valid_migrators[msg.sender], "Mig. invalid or unapproved");
         _stakeLocked(staker_address, msg.sender, amount, secs, start_timestamp);
     }
 
@@ -601,7 +515,7 @@ abstract contract StakingTreasury_ERC20R1 is Context, TimelockOwned, ReentrancyG
     event StakeLocked(address indexed user, uint256 amount, uint256 secs, bytes32 kek_id, address source_address);
     event WithdrawLocked(address indexed user, uint256 liquidity, bytes32 kek_id, address destination_address);
     event RecoverERC20(address token, address to, uint256 amount);
-    event SetPause(bool staking, bool withdraw, bool collectReward);
+    event SetPause(bool staking, bool updateStaking, bool withdraw, bool collectReward);
     event SetCollectRewardDelegator(address delegator_address);
     event SetBoostController(address boost_controller);
     event SetGreylist(address addr, bool v);

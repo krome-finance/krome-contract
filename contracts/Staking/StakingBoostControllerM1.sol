@@ -16,7 +16,7 @@ import "../Common/TimelockOwned.sol";
 import "../VeKrome/IveKrome.sol";
 import "../VeKrome/veBoost/IDelegationProxy.sol";
 
-contract StakingBoostControllerR1 is TimelockOwned {
+contract StakingBoostController is TimelockOwned {
     /* =========== CONSTANTS ================== */
     // Constant for various precisions
     uint256 public constant MULTIPLIER_PRECISION = 1e18;
@@ -29,6 +29,7 @@ contract StakingBoostControllerR1 is TimelockOwned {
 
     // Lock time and multiplier settings
     uint256 public lock_max_multiplier = uint256(3e18); // E18. 1x = e18
+    // increase max lock time for dummy stake
     uint256 public lock_time_for_max_multiplier = 1e12 * 365 * 86400; // 3 years
     uint256 public lock_time_min = 86400; // 1 * 86400  (1 day)
 
