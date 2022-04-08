@@ -108,14 +108,13 @@ contract StakingRewardComptrollerV3 is TimelockOwned, ReentrancyGuard {
     mapping(address => uint256) public rewardTokenAddrToIdx; // token addr -> token index
     uint256[] public rewardAccumulated;
     uint256[] public rewardClaimed;
-    // accumulated syned earnings
-    uint256[] public earningsAccumulated;
     
     // Reward period
     uint256 public rewardsDuration = 604800; // 7 * 86400  (7 days)
 
     // Reward tracking
     uint256[] private rewardsPerWeightStored;
+    uint256[] public totalRewardsStored;
 
     // rewardsPerWeightStored when user checkpointed
     mapping(address => mapping(uint256 => uint256)) private userRewardsPerWeightPaid; // staker addr -> token id -> paid amount
@@ -143,6 +142,8 @@ contract StakingRewardComptrollerV3 is TimelockOwned, ReentrancyGuard {
     IVeMultiplierSource public ve_multiplier_source;
     bool public source_synced;
     mapping(address => bool) public user_source_synced;
+
+    bool private _entered;
 
     /* ========== STRUCTURE ========== */
 
@@ -195,6 +196,7 @@ contract StakingRewardComptrollerV3 is TimelockOwned, ReentrancyGuard {
 
             // Initialize the stored rewards
             rewardsPerWeightStored.push(0);
+            totalRewardsStored.push(0);
 
             // Initialize the reward managers
             rewardManagers[_rewardTokens[i]] = _rewardManagers[i];
@@ -214,8 +216,6 @@ contract StakingRewardComptrollerV3 is TimelockOwned, ReentrancyGuard {
                 rewardAccumulated[i] = Math.max(source_comptroller.rewardAccumulated(i), source_comptroller.rewardClaimed(i));
                 rewardClaimed[i] = source_comptroller.rewardClaimed(i);
             }
-
-            earningsAccumulated.push(0);
         }
 
         // Initialization
@@ -229,7 +229,7 @@ contract StakingRewardComptrollerV3 is TimelockOwned, ReentrancyGuard {
 
     function _multiplier_on(VeKromeMultiplier memory ve, uint256 ts) internal pure returns (uint256) {
         require(ts >= ve.timestamp, "Invalid timestamp");
-        uint256 decrese = ve.dslope * (ve.staytime >= ts - ve.timestamp ? 0 : ts - ve.timestamp - ve.staytime);
+        uint256 decrese = ve.dslope * (ve.timestamp + ve.staytime >= ts ? 0 : ts - (ve.timestamp + ve.staytime));
         return ve.multiplier >= decrese ? ve.multiplier - decrese : 0;
     }
 
@@ -314,7 +314,7 @@ contract StakingRewardComptrollerV3 is TimelockOwned, ReentrancyGuard {
         uint staytime;
         if (ve.timestamp + ve.staytime >= end_time) {
             staytime = end_time - start_time;
-        } else if (ve.timestamp + ve.staytime >= start_time) {
+        } else if (ve.timestamp + ve.staytime <= start_time) {
             staytime = 0;
         } else {
             staytime = ve.timestamp + ve.staytime - start_time;
@@ -457,8 +457,7 @@ contract StakingRewardComptrollerV3 is TimelockOwned, ReentrancyGuard {
 
             // To keep the math correct, the user's combined weight must be recomputed to account for their
             // ever-changing veKROME balance.
-            (uint256 ve_multiplier, uint256 dslope, uint256 staytime)
-                = IStakingBoostController(treasury.boost_controller()).veKromeMultiplier(account, treasury.userStakedUsdk(account));
+            (uint256 ve_multiplier, uint256 dslope, uint256 staytime) = treasury.veKromeMultiplier(account);
             veMultipliers[account] = VeKromeMultiplier(
                 ve_multiplier,
                 dslope,
@@ -482,8 +481,10 @@ contract StakingRewardComptrollerV3 is TimelockOwned, ReentrancyGuard {
 
         // Update the rewards array
         for (uint256 i = 0; i < earned_arr.length; i++){ 
-            earningsAccumulated[i] = earningsAccumulated[i] + earned_arr[i] - rewards[account][i];
             rewards[account][i] = earned_arr[i];
+            if (address(source_comptroller) != address(0) && !user_source_synced[account]) {
+                totalRewardsStored[i] += earned_arr[i];
+            }
         }
 
         // Update the rewards paid array
@@ -515,7 +516,6 @@ contract StakingRewardComptrollerV3 is TimelockOwned, ReentrancyGuard {
 
         for (uint256 i = 0; i < rewardTokens.length; i++){ 
             rewards_before[i] = rewards[rewardee][i];
-            earningsAccumulated[i] += rewards_before[i];
             rewards[rewardee][i] = 0;
             rewardClaimed[i] += rewards_before[i];
             TransferHelper.safeTransfer(rewardTokens[i], destination_address, rewards_before[i]);
@@ -580,6 +580,9 @@ contract StakingRewardComptrollerV3 is TimelockOwned, ReentrancyGuard {
 
         // Update the rewardsPerWeightStored
         for (uint256 i = 0; i < rewardsPerWeightStored.length; i++){ 
+            if (source_synced && rewards_per_weight[i] > rewardsPerWeightStored[i]) {
+                totalRewardsStored[i] += ((rewards_per_weight[i] - rewardsPerWeightStored[i]) * _total_combined_weight / 1e18);
+            }
             rewardsPerWeightStored[i] = rewards_per_weight[i];
         }
 
@@ -620,24 +623,32 @@ contract StakingRewardComptrollerV3 is TimelockOwned, ReentrancyGuard {
         }
     }
 
+    /* ========== RESTRICTED FUNCTIONS - Owner or timelock only ========== */
+    
     function syncRewardRateForce() external onlyByOwnGov { // only ownerOrTimelock
         for (uint256 i = 0; i < rewardTokens.length; i++) {
             address gauge_controller_address = gaugeControllers[i];
             if (gauge_controller_address != address(0)) {
                 last_gauge_reward_rates[i] = IGaugeController(gauge_controller_address).global_emission_rate() * last_gauge_relative_weights[i] / 1e18;
             }
+        }
+    }
 
+    function syncTokenBalance() external onlyByOwnGov { // only ownerOrTimelock
+        for (uint256 i = 0; i < rewardTokens.length; i++) {
             uint256 tokenBalance = IERC20(rewardTokens[i]).balanceOf(address(this));
             if (rewardAccumulated[i] < tokenBalance + rewardClaimed[i]) {
                 rewardAccumulated[i] = tokenBalance + rewardClaimed[i];
             }
         }
-
     }
 
-    /* ========== RESTRICTED FUNCTIONS - Owner or timelock only ========== */
-    
-    // ------ PAUSES ------
+    function setRewardDuration(uint256 duration) external onlyByOwnGov {
+        require(duration > 0, "invalid duration");
+        rewardsDuration = duration;
+
+        emit SetRewardDuration(duration);
+    }
 
     // Added to support recovering LP Rewards and other mistaken tokens from other systems to be distributed to holders
 
@@ -716,7 +727,7 @@ contract StakingRewardComptrollerV3 is TimelockOwned, ReentrancyGuard {
     function migrate_earned(address _account, uint256[] calldata _earned_arr) external onlyValidMigrator {
        for (uint256 i = 0; i < _earned_arr.length; i++){ 
             rewards[_account][i] += _earned_arr[i];
-            earningsAccumulated[i] += _earned_arr[i];
+            totalRewardsStored[i] += _earned_arr[i];
         }
     }
 
@@ -732,6 +743,7 @@ contract StakingRewardComptrollerV3 is TimelockOwned, ReentrancyGuard {
 
     /* ========== EVENTS ========== */
     event SetMigrator(address migrator_address, bool v);
+    event SetRewardDuration(uint256 duration);
 
     /* ========== A CHICKEN ========== */
     //

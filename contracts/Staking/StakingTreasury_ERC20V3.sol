@@ -367,7 +367,7 @@ abstract contract StakingTreasury_ERC20V3 is Context, TimelockOwned, ReentrancyG
     // Two different collectReward functions are needed because of delegateCall and msg.sender issues
     function collectReward() external nonReentrant returns (uint256[] memory) {
         _require_reward_comptroller();
-        require(collect_reward_delegator == address(0), "Only reward collecting delegator can perform this action");
+        require(collect_reward_delegator == address(0) || owner == msg.sender, "Only reward collecting delegator can perform this action");
         require(rewardsCollectionPaused == false, "Rewards collection paused");
         return reward_comptroller.collectRewardFor(msg.sender, msg.sender);
     }

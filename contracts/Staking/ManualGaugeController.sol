@@ -141,7 +141,10 @@ contract ManualGaugeController is Owned {
         return _gauge_relative_weight(gauge, time);
     }
 
-    function gauge_relative_weight_write(address gauge, uint256 time) external view returns(uint256) {
+    function gauge_relative_weight_write(address gauge, uint256 time) external returns(uint256) {
+
+        sync();
+
         return _gauge_relative_weight(gauge, time);
     }
 

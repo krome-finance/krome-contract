@@ -371,6 +371,7 @@ abstract contract StakingTreasury_ERC20 is Context, TimelockOwned, ReentrancyGua
 
         // Get the lock multiplier and kek_id
         uint256 lock_multiplier = !allowUnlockedStake || secs > 0 ? boost_controller.lockMultiplier(secs) : MULTIPLIER_PRECISION;
+
         bytes32 kek_id = keccak256(abi.encodePacked(staker_address, start_timestamp, liquidity, _locked_liquidity[staker_address]));
 
         // Pull in the required token(s)

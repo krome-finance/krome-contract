@@ -16,7 +16,7 @@ import "../Common/TimelockOwned.sol";
 import "../VeKrome/IveKrome.sol";
 import "../VeKrome/veBoost/IDelegationProxy.sol";
 
-contract StakingBoostController is TimelockOwned {
+contract StakingBoostControllerM1 is TimelockOwned {
     /* =========== CONSTANTS ================== */
     // Constant for various precisions
     uint256 public constant MULTIPLIER_PRECISION = 1e18;

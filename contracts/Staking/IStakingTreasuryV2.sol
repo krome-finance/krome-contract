@@ -16,6 +16,7 @@ interface IStakingTreasuryV2 {
     function lockedStakesOf(address account) external view returns (LockedStake[] memory);
     function lockedLiquidityOf(address account) external view returns (uint256);
     function boost_controller() external view returns (address);
+    function veKromeMultiplier(address account) external view returns (uint256 ve_multiplier, uint256 slope, uint256 stay_time);
 
     function sync() external;
 }
