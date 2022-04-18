@@ -4,6 +4,10 @@ pragma solidity ^0.8.0;
 import "../../External/Claimswap/IUniswapV2Pair.sol";
 import "../StakingTreasury_ERC20V3.sol";
 
+interface IUsdkPriceProvider {
+    function usdk_price() external view returns (uint256);
+}
+
 
 contract TreasuryUsdkUniswapPairV3 is StakingTreasury_ERC20V3 {
     IUniswapV2Pair internal immutable pair;
@@ -24,5 +28,9 @@ contract TreasuryUsdkUniswapPairV3 is StakingTreasury_ERC20V3 {
     function usdkPerLPToken() public override view returns (uint256) {
         (uint112 reserve0, uint112 reserve1, ) = pair.getReserves();
         return uint256((pair.token0() == usdk_address) ? reserve0 : reserve1) * 1e18 / pair.totalSupply();
+    }
+
+    function getVirtualPrice() public override view returns (uint256) {
+        return 2 * usdkPerLPToken() * IUsdkPriceProvider(usdk_address).usdk_price() / 1e6;
     }
 }

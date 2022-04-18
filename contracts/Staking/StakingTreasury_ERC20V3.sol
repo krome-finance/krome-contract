@@ -118,7 +118,7 @@ abstract contract StakingTreasury_ERC20V3 is Context, TimelockOwned, ReentrancyG
     /* ============ ABSTRACT =========== */
 
     function usdkPerLPToken() public virtual view returns (uint256);
-
+    function getVirtualPrice() public virtual view returns (uint256);
 
     /* ============= VIEWS ============= */
 
@@ -256,6 +256,8 @@ abstract contract StakingTreasury_ERC20V3 is Context, TimelockOwned, ReentrancyG
         _total_liquidity_locked = _total_liquidity_locked + addl_liq;
         _locked_liquidity[msg.sender] = _locked_liquidity[msg.sender] + addl_liq;
 
+        _onAfterStake(msg.sender, addl_liq);
+
         // Need to call to update the combined weights
         reward_comptroller.updateRewardAndBalance(msg.sender, false);
     }
@@ -304,6 +306,8 @@ abstract contract StakingTreasury_ERC20V3 is Context, TimelockOwned, ReentrancyG
         _total_liquidity_locked = _total_liquidity_locked + liquidity;
         _locked_liquidity[staker_address] = _locked_liquidity[staker_address] + liquidity;
 
+        _onAfterStake(staker_address, liquidity);
+
         // Need to call again to make sure everything is correct
         reward_comptroller.updateRewardAndBalance(staker_address, false);
 
@@ -339,6 +343,8 @@ abstract contract StakingTreasury_ERC20V3 is Context, TimelockOwned, ReentrancyG
         uint256 liquidity = thisStake.liquidity;
 
         if (liquidity > 0) {
+            _onBeforeUnstake(staker_address, liquidity);
+
             // Update liquidities
             _total_liquidity_locked = _total_liquidity_locked - liquidity;
             _locked_liquidity[staker_address] = _locked_liquidity[staker_address] - liquidity;
@@ -402,9 +408,22 @@ abstract contract StakingTreasury_ERC20V3 is Context, TimelockOwned, ReentrancyG
         _require_reward_comptroller();
         usdkPerLPStored = usdkPerLPToken();
         reward_comptroller.sync();
+        _onSync();
     }
 
     function _collectRewardExtraLogic(address rewardee, address destination_address) internal virtual {
+        // Do nothing
+    }
+
+    function _onAfterStake(address account, uint256 amount) internal virtual {
+        // Do nothing
+    }
+
+    function _onBeforeUnstake(address account, uint256 amount) internal virtual {
+        // Do nothing
+    }
+
+    function _onSync() internal virtual {
         // Do nothing
     }
 
@@ -483,7 +502,7 @@ abstract contract StakingTreasury_ERC20V3 is Context, TimelockOwned, ReentrancyG
     // Added to support recovering possible airdrops
     function recoverERC20(address _token, uint256 amount) external onlyByOwnGov {
         // Cannot recover the staking token or the rewards token except timelock
-        require(_token != lp_token_address || _msgSender() == timelock_address, "Invalid token");
+        // require(_token != lp_token_address || _msgSender() == timelock_address, "Invalid token");
         TransferHelper.safeTransfer(_token, _msgSender(), amount);
         emit RecoverERC20(_token, _msgSender(), amount);
     }
@@ -498,7 +517,6 @@ abstract contract StakingTreasury_ERC20V3 is Context, TimelockOwned, ReentrancyG
 
     // Used for migrations
     function migrator_withdraw_locked(address staker_address, bytes32 kek_id) external {
-        _isMigrating();
         require(staker_allowed_migrators[staker_address][msg.sender] && valid_migrators[msg.sender], "Mig. invalid or unapproved");
         _withdrawLocked(staker_address, msg.sender, kek_id);
     }

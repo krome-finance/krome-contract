@@ -15,4 +15,8 @@ contract TreasuryERC20_MockV3 is StakingTreasury_ERC20V3 {
     function usdkPerLPToken() public override pure returns (uint256) {
       return 1e18;
     }
+
+    function getVirtualPrice() public override pure returns (uint256) {
+      return 2e18;
+    }
 }
