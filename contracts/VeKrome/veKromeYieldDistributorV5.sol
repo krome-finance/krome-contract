@@ -26,11 +26,11 @@ pragma solidity ^0.8.0;
 // Originally inspired by Synthetix.io, but heavily modified by the Frax team (veKROME portion)
 // https://github.com/Synthetixio/synthetix/blob/develop/contracts/StakingRewards.sol
 
+import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 import "../Math/Math.sol";
 import "./IveKrome.sol";
 import "../Libs/TransferHelper.sol";
-import "../Common/ReentrancyGuard.sol";
-import "../Common/TimelockOwned.sol";
+import "../Common/LocatorBasedProxy.sol";
 import "../ERC20/IERC20.sol";
 
 // cp = checkpoint
@@ -38,13 +38,18 @@ import "../ERC20/IERC20.sol";
 // ts = current timestamp
 //
 
-contract veKromeYieldDistributorV5 is TimelockOwned, ReentrancyGuard {
-    struct UserCheckpoint {
+contract veKromeYieldDistributorV5 is LocatorBasedProxy, ReentrancyGuardUpgradeable {
+    struct UserYieldCheckpoint {
         uint256 earned;
         uint256 nextYieldIndex;
+        uint256 vekromeIndex;
+    }
+
+    struct UserVeKromeCheckpoint {
         uint256 veKrome; // veKromeBalance @ ts
         uint256 lockEnd; // lock End
         uint256 ts; // lock updated timestamp
+        uint256 yieldLength;
     }
 
     struct Yield {
@@ -52,21 +57,27 @@ contract veKromeYieldDistributorV5 is TimelockOwned, ReentrancyGuard {
         uint256 ts;
     }
 
+    struct PeriodYield {
+        uint256 ts;
+        uint256 yield;
+    }
+
+    struct YieldInfo {
+        uint256 yieldKrome;
+        uint256 lockedKrome;
+        uint256 ts;
+    }
+
     /* ========== STATE VARIABLES ========== */
 
-    // Instances
-    IveKrome private immutable veKROME;
-
-    uint256 public constant YIELD_DURATION = 3600 * 24 * 7; // WEEK
-
-    // Addresses
-    address public immutable emitted_token_address;
-
+    uint256 public constant YIELD_PERIOD_DURATION = 3600 * 24 * 7; // WEEK
     uint256 private constant YIELD_PRECISION = 1e18;
     uint256 private constant YIELD_PER_VEKROME_PRECISION = 1e18;
 
-    // Constant for price precision
-    uint256 private constant PRICE_PRECISION = 1e6;
+    // Instances
+    IveKrome private veKROME;
+    // Addresses
+    address public emitted_token_address;
 
     uint256 public total_yield; // accumulated reward. never decreases.
     uint256 public claimed_yield; // accumulated reward. never decreases.
@@ -74,43 +85,54 @@ contract veKromeYieldDistributorV5 is TimelockOwned, ReentrancyGuard {
     mapping(address => bool) public reward_notifiers;
     Yield[] public yields;
 
+    PeriodYield[] public period_yields;
+
     // user checkpoint
-    mapping(address => UserCheckpoint) public user_checkpoints;
+    mapping(address => UserYieldCheckpoint) public user_yield_checkpoints;
+    mapping(address => UserVeKromeCheckpoint[]) public user_vekrome_checkpoints;
     mapping(address => uint256) public user_earning_accumulated;
 
     // Greylists
     mapping(address => bool) public greylist;
 
+    /* =========== CONFIGS ==============*/
     // Admin booleans for emergencies
-    bool public yield_collection_paused = false; // For emergencies
+    bool public yield_collection_paused; // For emergencies
+    uint256 public max_checkpoint_yields;
 
-    uint256 public max_checkpoint_yields = 30;
+    // update v1
+    YieldInfo[] public yield_infos;
 
     /* ========== MODIFIERS ========== */
 
     modifier onlyByOwnGov() {
-        require( msg.sender == owner || msg.sender == timelock_address, "Not owner or timelock");
+        require(msg.sender == locator.owner_address() || msg.sender == locator.timelock(), "Not owner or timelock");
         _;
     }
 
     /* ========== CONSTRUCTOR ========== */
 
-    constructor (
-        address _owner,
+    function initialize (
+        address _locator,
         address _emittedToken,
-        address _timelock_address,
         address _veKrome_address
-    ) TimelockOwned(_owner, _timelock_address) {
+    ) external initializer {
+        LocatorBasedProxy.initializeLocatorBasedProxy(_locator);
+        ReentrancyGuardUpgradeable.__ReentrancyGuard_init();
         emitted_token_address = _emittedToken;
 
         veKROME = IveKrome(_veKrome_address);
 
-        reward_notifiers[_owner] = true;
+        reward_notifiers[locator.owner_address()] = true;
+
+        // CONFIGS
+        yield_collection_paused = false; // For emergencies
+        max_checkpoint_yields = 30;
     }
 
     /* ========== VIEWS ========== */
 
-    function _vekrome_on(UserCheckpoint memory cp, uint256 ts) internal pure returns (uint256) {
+    function _vekrome_on(UserVeKromeCheckpoint memory cp, uint256 ts) internal pure returns (uint256) {
         if (cp.veKrome == 0) return 0;
         if (ts < cp.ts) return 0;
         if (ts >= cp.lockEnd) return 0;
@@ -121,27 +143,113 @@ contract veKromeYieldDistributorV5 is TimelockOwned, ReentrancyGuard {
     }
 
     function earned(address account) public view returns (uint256 earning) {
-        (earning, ) = _earned(account, 0);
+        (earning,, ) = _earned(account, 0);
     }
 
-    function _earned(address account, uint256 max_yield) internal view returns (uint256 earning, uint256 next_yield_index) {
-        UserCheckpoint memory cp = user_checkpoints[account];
-        if (cp.ts == 0) return (0, yields.length); // not checkpointed
+    function _earned(address account, uint256 max_yield) internal view returns (uint256 earning, uint256 next_yield_index, uint256 vekrome_index) {
+        UserYieldCheckpoint memory cp = user_yield_checkpoints[account];
+        UserVeKromeCheckpoint[] memory vekromeCpList = user_vekrome_checkpoints[account];
+
+        if (vekromeCpList.length == 0 || yields.length == 0) return (0, yields.length, 0); // not checkpointed
+
+        earning = cp.earned;
+        vekrome_index = cp.vekromeIndex;
 
         uint256 last_index = max_yield > 0 ? Math.min(cp.nextYieldIndex + max_yield, yields.length) : yields.length;
-        earning = cp.earned;
         for (next_yield_index = cp.nextYieldIndex; next_yield_index < last_index; next_yield_index++) {
-            uint256 vekrome = _vekrome_on(cp, yields[next_yield_index].ts);
+            while (vekrome_index < vekromeCpList.length - 1 && vekromeCpList[vekrome_index + 1].yieldLength <= next_yield_index) vekrome_index++;
+            uint256 vekrome = _vekrome_on(vekromeCpList[vekrome_index], yields[next_yield_index].ts);
             earning += vekrome * yields[next_yield_index].yieldPerVeKrome / YIELD_PER_VEKROME_PRECISION;
         }
     }
 
     function getState() external view returns (
         uint256 totalYield,
-        uint256 claimedYield
+        uint256 claimedYield,
+        uint256 recentAvgYield,
+        uint256 totalPeriod
     ) {
         totalYield = total_yield;
         claimedYield = claimed_yield;
+
+        if (period_yields.length > 1) {
+            uint256 recentSum = 0;
+            uint256 start = period_yields.length - 1;
+            uint256 count = 0;
+            for (uint256 i = start; i >= 0 && start - i < 3; i--) {
+                recentSum += period_yields[i].yield;
+                count++;
+            }
+            recentAvgYield = count > 0 ? recentSum  / count  : 0;
+        } else {
+            recentAvgYield = 0;
+        }
+
+        if (yields.length > 0) {
+            totalPeriod = block.timestamp - yields[0].ts;
+        } else {
+            totalPeriod = 0;
+        }
+
+    }
+
+    function getYieldLength() external view returns (uint256) {
+        return yields.length;
+    }
+
+    function getYieldsPage(uint256 idx, uint256 size) external view returns (Yield[] memory yields_page) {
+        uint256 end = Math.min(yields.length, idx + size);
+        if (end < idx) return new Yield[](0);
+
+        yields_page = new Yield[](end - idx);
+        for (uint256 i = idx; i < end; i++) {
+            yields_page[i - idx] = yields[i];
+        }
+    }
+
+    function getPeriodYieldLength() external view returns (uint256) {
+        return period_yields.length;
+    }
+
+    function getPeirodYieldsPage(uint256 idx, uint256 size) external view returns (PeriodYield[] memory yields_page) {
+        uint256 end = Math.min(period_yields.length, idx + size);
+        if (end < idx) return new PeriodYield[](0);
+
+        yields_page = new PeriodYield[](end - idx);
+        for (uint256 i = idx; i < end; i++) {
+            yields_page[i - idx] = period_yields[i];
+        }
+    }
+
+    function getPeriodYield() external view returns (uint256 yield) {
+        if (period_yields.length == 0) return 0;
+        PeriodYield memory periodYield = period_yields[period_yields.length - 1];
+        uint256 cur_period_ts = (block.timestamp / YIELD_PERIOD_DURATION) * YIELD_PERIOD_DURATION;
+        return (periodYield.ts == cur_period_ts) ? periodYield.yield : 0;
+    }
+
+    function getYieldInfoLength() external view returns (uint256) {
+        return yield_infos.length;
+    }
+
+    function getYieldInfoPage(uint256 idx, uint256 size) external view returns (YieldInfo[] memory yields_page) {
+        uint256 end = Math.min(yield_infos.length, idx + size);
+        if (end < idx) return new YieldInfo[](0);
+
+        yields_page = new YieldInfo[](end - idx);
+        for (uint256 i = idx; i < end; i++) {
+            yields_page[i - idx] = yield_infos[i];
+        }
+    }
+
+    function getUserVeKromeCheckpointLength(address account) external view returns (uint256) {
+        return user_vekrome_checkpoints[account].length;
+    }
+
+    function getCurrentVeKromeCheckpoint(address account) external view returns (UserVeKromeCheckpoint memory) {
+        UserVeKromeCheckpoint[] memory checkpoints = user_vekrome_checkpoints[account];
+        if (checkpoints.length == 0) return UserVeKromeCheckpoint(0, 0, 0, 0);
+        return checkpoints[checkpoints.length - 1];
     }
 
     /* ========== MUTATIVE FUNCTIONS ========== */
@@ -156,29 +264,28 @@ contract veKromeYieldDistributorV5 is TimelockOwned, ReentrancyGuard {
     }
 
     function _checkpointUser(address account, uint256 max_yields) internal {
-        // Need to retro-adjust some things if the period hasn't been renewed, then start a new one
-        (uint256 earning, uint256 next_yield_index) = _earned(account, max_yields);
+        UserVeKromeCheckpoint memory cp = UserVeKromeCheckpoint({
+            veKrome: veKROME.balanceOf(account),
+            lockEnd: veKROME.locked__end(account),
+            ts: block.timestamp,
+            yieldLength: yields.length
+        });
 
-        if (next_yield_index >= yields.length) { // full update or new account
-            user_checkpoints[account] = UserCheckpoint({
-                earned: earning,
-                nextYieldIndex: next_yield_index,
-                veKrome: veKROME.balanceOf(account),
-                lockEnd: veKROME.locked__end(account),
-                ts: block.timestamp
-            });
-        } else { // partial update
-            Yield memory nextYield = yields[next_yield_index];
-            UserCheckpoint memory cp = user_checkpoints[account];
-
-            user_checkpoints[account] = UserCheckpoint({
-                earned: earning,
-                nextYieldIndex: next_yield_index,
-                veKrome: _vekrome_on(cp, nextYield.ts),
-                lockEnd: cp.lockEnd,
-                ts: nextYield.ts
-            });
+        UserVeKromeCheckpoint[] storage vekrome_cp_list = user_vekrome_checkpoints[account];
+        if (vekrome_cp_list.length == 0 || vekrome_cp_list[vekrome_cp_list.length - 1].yieldLength < yields.length) {
+            vekrome_cp_list.push(cp);
+        } else {
+            vekrome_cp_list[vekrome_cp_list.length - 1] = cp;
         }
+
+        // Need to retro-adjust some things if the period hasn't been renewed, then start a new one
+        (uint256 earning, uint256 next_yield_index, uint256 vekrome_index) = _earned(account, max_yields);
+
+        user_yield_checkpoints[account] = UserYieldCheckpoint({
+            earned: earning,
+            nextYieldIndex: next_yield_index,
+            vekromeIndex: vekrome_index
+        });
     }
 
     // Anyone can checkpoint another user
@@ -191,17 +298,17 @@ contract veKromeYieldDistributorV5 is TimelockOwned, ReentrancyGuard {
         _checkpointUser(msg.sender, max_checkpoint_yields);
     }
 
-    function _collectYieldFor(address account, address recipient) public nonReentrant returns (uint256 earning) {
+    function _collectYieldFor(address account, address recipient) internal nonReentrant returns (uint256 earning) {
         require(yield_collection_paused == false, "Yield collection is paused");
         require(greylist[account] == false, "Address has been greylisted");
-        require(yields.length - user_checkpoints[account].nextYieldIndex <= max_checkpoint_yields, "checkpoint required");
+        // require(yields.length - user_yield_checkpoints[account].nextYieldIndex <= max_checkpoint_yields, "checkpoint required");
 
         _checkpointUser(account, max_checkpoint_yields);
 
-        earning = user_checkpoints[account].earned;
+        earning = user_yield_checkpoints[account].earned;
 
         if (earning > 0) {
-            user_checkpoints[account].earned = 0;
+            user_yield_checkpoints[account].earned = 0;
             user_earning_accumulated[account] += earning;
             claimed_yield += earning;
 
@@ -225,7 +332,7 @@ contract veKromeYieldDistributorV5 is TimelockOwned, ReentrancyGuard {
     function collectYieldReApe() external returns (uint256 earning) {
         earning = _collectYieldFor(msg.sender, address(this));
         TransferHelper.safeApprove(emitted_token_address, address(veKROME), earning);
-        veKROME.deposit_for(msg.sender, earning);
+        veKROME.manage_deposit_for(msg.sender, earning, 0);
     }
 
     function notifyRewardAmount(uint256 amount) external {
@@ -246,13 +353,23 @@ contract veKromeYieldDistributorV5 is TimelockOwned, ReentrancyGuard {
             yieldPerVeKrome: amount * YIELD_PER_VEKROME_PRECISION / vekrome_total_supply,
             ts: block.timestamp
         }));
+        yield_infos.push(YieldInfo({
+            yieldKrome: amount,
+            lockedKrome: veKROME.totalKromeSupply(),
+            ts: block.timestamp
+        }));
+
+        uint256 cur_period_ts = (block.timestamp / YIELD_PERIOD_DURATION) * YIELD_PERIOD_DURATION;
+        if (period_yields.length == 0 || period_yields[period_yields.length - 1].ts != cur_period_ts) {
+            period_yields.push(PeriodYield({ts: cur_period_ts, yield: amount }));
+        } else {
+            period_yields[period_yields.length - 1].yield += amount;
+        }
 
         emit RewardAdded(amount);
     }
 
     function lockChanged(address account) external {
-        require(msg.sender == address(veKROME));
-
         _checkpointUser(account, 0);
     }
 
@@ -261,7 +378,7 @@ contract veKromeYieldDistributorV5 is TimelockOwned, ReentrancyGuard {
     // Added to support recovering LP Yield and other mistaken tokens from other systems to be distributed to holders
     function recoverERC20(address tokenAddress, uint256 tokenAmount) external onlyByOwnGov {
         // Only the owner address can ever receive the recovery withdrawal
-        TransferHelper.safeTransfer(tokenAddress, owner, tokenAmount);
+        TransferHelper.safeTransfer(tokenAddress, locator.owner_address(), tokenAmount);
         emit RecoveredERC20(tokenAddress, tokenAmount);
     }
 
@@ -283,6 +400,23 @@ contract veKromeYieldDistributorV5 is TimelockOwned, ReentrancyGuard {
     function setPause(bool _v) external onlyByOwnGov {
         yield_collection_paused = _v;
         emit SetPause(_v);
+    }
+
+    function migrateYieldInfo(uint256 idx, uint256 yieldKrome, uint256 lockedKrome, uint256 ts) external onlyByOwnGov {
+        require(yield_infos.length >= idx, "invalid state");
+        if (yield_infos.length == idx) {
+            yield_infos.push(YieldInfo({
+                yieldKrome: yieldKrome,
+                lockedKrome: lockedKrome,
+                ts: ts
+            }));
+        } else {
+            yield_infos[idx] = YieldInfo({
+                yieldKrome: yieldKrome,
+                lockedKrome: lockedKrome,
+                ts: ts
+            });
+        }
     }
 
     /* ========== EVENTS ========== */

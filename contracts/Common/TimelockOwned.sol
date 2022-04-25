@@ -2,7 +2,7 @@
 pragma solidity ^0.8.0;
 
 // https://docs.synthetix.io/contracts/Owned
-contract TimelockOwned {
+abstract contract TimelockOwned {
     address public owner;
     address public nominatedOwner;
     address public timelock_address;

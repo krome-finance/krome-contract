@@ -105,6 +105,7 @@ contract EklipseDelegator is TimelockOwnedProxy, IEklipseDelegator{
         if (auto_lock_ekl) {
             uint256 eklBalance = ekl.balanceOf(address(this));
             if (eklBalance > manage_ekl_threshold) {
+                TransferHelper.safeApprove(address(ekl), address(lock), eklBalance);
                 lock.addLock(eklBalance, auto_ekl_lock_period);
             }
         }

@@ -6,6 +6,8 @@ interface IUsdkPool {
     function getUsdkPrice() external view returns (uint256);
     function buybackAvailableCollat() external view returns (uint256);
     function collateralAddrToIdx(address) external view returns (uint256);
+    function enabled_collaterals(address) external view returns (bool);
+    function collateral_prices(uint256) external view returns (uint256);
     function amoMinterBorrow(uint256 collateral_amount) external;
 
     // // by UsdkPoolHelper
