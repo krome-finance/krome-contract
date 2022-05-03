@@ -174,12 +174,13 @@ contract veKromeYieldDistributorV5 is LocatorBasedProxy, ReentrancyGuardUpgradea
 
         if (period_yields.length > 1) {
             uint256 recentSum = 0;
-            uint256 start = period_yields.length - 1;
+            uint256 i = period_yields.length;
             uint256 count = 0;
-            for (uint256 i = start; i >= 0 && start - i < 3; i--) {
+            do {
+                i--;
                 recentSum += period_yields[i].yield;
                 count++;
-            }
+            } while (count < 3 && i > 0);
             recentAvgYield = count > 0 ? recentSum  / count  : 0;
         } else {
             recentAvgYield = 0;

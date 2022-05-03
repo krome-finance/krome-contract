@@ -30,8 +30,8 @@ pragma solidity ^0.8.0;
 import "./ICollatBalance.sol";
 import "./IAMOMinter.sol";
 import "./IUsdk.sol";
+import "./IUsdkPoolV5.sol";
 import "../Krome/IKrome.sol";
-import "./IUsdkPool.sol";
 import "../ERC20/ERC20.sol";
 import "../Common/LocatorBasedProxyV2.sol";
 import '../Libs/TransferHelper.sol';
@@ -167,6 +167,10 @@ contract UsdkAMOMinterV2 is LocatorBasedProxyV2 {
         return usdk_val_e18_corrected - usdk_mint_balances[amo_address] - amo_collat_borrowed_balances[amo_address];
     }
 
+    function allCollaterals() external view returns (Collateral[] memory) {
+        return collaterals;
+    }
+
     /* ========== PUBLIC FUNCTIONS ========== */
 
     function safe_uint256(int256 v) internal pure returns (uint256) {
@@ -280,11 +284,9 @@ contract UsdkAMOMinterV2 is LocatorBasedProxyV2 {
         uint256 collat_amount
     ) external onlyByOwnGov validAMO(destination_amo) {
         uint256 collat_order = collateral_order[collateral_address];
-        require(collat_order > 0, "invalid colalteral");
+        require(collat_order > 0, "invalid collateral");
 
-        Collateral memory collat = collaterals[collat_order];
-
-        IUsdkPool pool = IUsdkPool(collat.pool_address);
+        Collateral memory collat = collaterals[collat_order - 1];
 
         require(collat_amount < 2 ** 255 / (10 ** collat.missing_decimals), "collat_amount overflow");
         int256 collat_amount_i256 = int256(collat_amount * (10 ** collat.missing_decimals));
@@ -294,8 +296,10 @@ contract UsdkAMOMinterV2 is LocatorBasedProxyV2 {
         collat_borrowed_balances[collateral_address] += collat_amount_i256;
         collat_borrowed_sum += collat_amount_i256;
 
+        IUsdkPoolV5 pool = IUsdkPoolV5(collat.pool_address);
+
         // Borrow the collateral
-        pool.amoMinterBorrow(collat_amount);
+        pool.amoMinterBorrow(collat.col_idx, collat_amount);
 
         // Give the collateral to the AMO
         TransferHelper.safeTransfer(collateral_address, destination_amo, collat_amount);
@@ -306,11 +310,11 @@ contract UsdkAMOMinterV2 is LocatorBasedProxyV2 {
 
     function receiveCollatFromAMO(address collateral_address, uint256 collat_amount) external validAMO(msg.sender) {
         uint256 collat_order = collateral_order[collateral_address];
-        require(collat_order > 0, "invalid colalteral");
+        require(collat_order > 0, "invalid collateral");
 
-        Collateral memory collat = collaterals[collat_order];
+        Collateral memory collat = collaterals[collat_order - 1];
 
-        IUsdkPool pool = IUsdkPool(collat.pool_address);
+        IUsdkPoolV5 pool = IUsdkPoolV5(collat.pool_address);
 
         require(collat_amount < 2 ** 255 / (10 ** collat.missing_decimals), "collat_amount overflow");
         int256 collat_amt_i256 = int256(collat_amount * (10 ** collat.missing_decimals));
@@ -329,9 +333,9 @@ contract UsdkAMOMinterV2 is LocatorBasedProxyV2 {
 
     function rebalanceCollatBorrowing(address collateral_from, address collateral_to, uint256 collat_amount_e18) external onlyByOwnGov {
         uint256 collat_from_order = collateral_order[collateral_from];
-        require(collat_from_order> 0, "invalid colalteral from address");
+        require(collat_from_order> 0, "invalid collateral from address");
         uint256 collat_to_order = collateral_order[collateral_to];
-        require(collat_to_order> 0, "invalid colalteral to address");
+        require(collat_to_order> 0, "invalid collateral to address");
 
         require(collat_amount_e18 < 2 ** 255, "collat_amount overflow");
         int256 collat_amt_i256 = int256(collat_amount_e18);
@@ -343,7 +347,7 @@ contract UsdkAMOMinterV2 is LocatorBasedProxyV2 {
     // migrate borrowing from old minter
     function migrateBorrowing(address amo_address, address collateral_address, uint256 collat_amount_e18) external onlyByOwnGov {
         uint256 collat_order = collateral_order[collateral_address];
-        require(collat_order> 0, "invalid colalteral from address");
+        require(collat_order> 0, "invalid collateral from address");
 
         require(collat_amount_e18 < 2 ** 255, "collat_amount overflow");
         int256 collat_amount_i256 = int256(collat_amount_e18);
@@ -357,8 +361,8 @@ contract UsdkAMOMinterV2 is LocatorBasedProxyV2 {
 
     function addCollateral(address collateral_address, address pool_address) public onlyByOwnGov {
         require(collateral_order[collateral_address] == 0, "duplicated collateral");
-        require(IUsdkPool(pool_address).enabled_collaterals(collateral_address), "invalid or disabled collateral");
-        uint256 col_idx = IUsdkPool(pool_address).collateralAddrToIdx(collateral_address);
+        require(IUsdkPoolV5(pool_address).enabled_collaterals(collateral_address), "invalid or disabled collateral");
+        uint256 col_idx = IUsdkPoolV5(pool_address).collateralAddrToIdx(collateral_address);
         require(col_idx < 2**96, "too big col_idx");
 
         collaterals.push(Collateral({
@@ -373,8 +377,8 @@ contract UsdkAMOMinterV2 is LocatorBasedProxyV2 {
     function updateCollateral(address collateral_address, address pool_address) public onlyByOwnGov {
         uint256 collat_order = collateral_order[collateral_address];
         require(collateral_order[collateral_address] > 0, "duplicated collateral");
-        require(IUsdkPool(pool_address).enabled_collaterals(collateral_address), "invalid or disabled collateral");
-        uint256 col_idx = IUsdkPool(pool_address).collateralAddrToIdx(collateral_address);
+        require(IUsdkPoolV5(pool_address).enabled_collaterals(collateral_address), "invalid or disabled collateral");
+        uint256 col_idx = IUsdkPoolV5(pool_address).collateralAddrToIdx(collateral_address);
         require(col_idx < 2**96, "too big col_idx");
 
         collaterals[collat_order - 1] = Collateral({

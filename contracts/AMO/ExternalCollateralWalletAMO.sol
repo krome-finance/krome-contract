@@ -2,14 +2,14 @@
 pragma solidity ^0.8.0;
 
 import "./IAMO.sol";
-import "../Common/LocatorBasedProxy.sol";
-import "../Usdk/IAMOMinter.sol";
+import "../Common/LocatorBasedProxyV2.sol";
+import "../Usdk/IAMOMinterV2.sol";
 import "../Libs/TransferHelper.sol";
 
-abstract contract ExternalCollateralWalletAMO is LocatorBasedProxy, IAMO {
+abstract contract ExternalCollateralWalletAMO is LocatorBasedProxyV2, IAMO {
 
     /* ========== CONFIGURATION ========== */
-    IAMOMinter public amo_minter;
+    IAMOMinterV2 public amo_minter;
     address public external_wallet_address;
 
     /* ========== STATE VARIABLES ========== */
@@ -36,9 +36,9 @@ abstract contract ExternalCollateralWalletAMO is LocatorBasedProxy, IAMO {
         address _amo_minter,
         address _external_wallet
     ) internal initializer {
-        LocatorBasedProxy.initializeLocatorBasedProxy(_locator_address);
+        LocatorBasedProxyV2.initializeLocatorBasedProxy(_locator_address);
         
-        amo_minter = IAMOMinter(_amo_minter);
+        amo_minter = IAMOMinterV2(_amo_minter);
         external_wallet_address = _external_wallet;
     }
 
@@ -54,17 +54,16 @@ abstract contract ExternalCollateralWalletAMO is LocatorBasedProxy, IAMO {
 
     /* ========== AMO ========== */
 
-
-    function borrowCollat(uint256 amount) external onlyByExtWallet {
-        TransferHelper.safeTransfer(amo_minter.collateral_address(), external_wallet_address, amount);
+    // Call amoMinter.giveColaltToAMO() first, and call this
+    function borrowCollat(address collat_address, uint256 amount) external onlyByExtWallet {
+        TransferHelper.safeTransfer(collat_address, external_wallet_address, amount);
         borrowedCollat += amount;
         emit BorrowCollat(amount, borrowedCollat);
     }
 
-    function returnCollat(uint256 amount) external onlyByExtWallet {
-        address collat_address = amo_minter.collateral_address();
+    function returnCollat(address collat_address, uint256 amount) external onlyByExtWallet {
         TransferHelper.safeApprove(collat_address, address(amo_minter), amount);
-        amo_minter.receiveCollatFromAMO(amount);
+        amo_minter.receiveCollatFromAMO(collat_address, amount);
         returnedCollat += amount;
         emit ReturnCollat(amount, returnedCollat);
     }
@@ -74,6 +73,11 @@ abstract contract ExternalCollateralWalletAMO is LocatorBasedProxy, IAMO {
     function setExternalWallet(address wallet_address) external onlyByManager {
         external_wallet_address = wallet_address;
         emit SetExternalWallet(wallet_address);
+    }
+
+    function setAMOMinter(address _amo_minter_address) external onlyByManager {
+        amo_minter = IAMOMinterV2(_amo_minter_address);
+        emit SetAMOMinter(_amo_minter_address);
     }
 
     /* ========== EMERGENCY ========== */
@@ -109,6 +113,7 @@ abstract contract ExternalCollateralWalletAMO is LocatorBasedProxy, IAMO {
 
 
     event SetExternalWallet(address);
+    event SetAMOMinter(address);
     event RecoverERC20(address token, address to, uint256 amount);
     event BorrowCollat(uint256, uint256);
     event ReturnCollat(uint256, uint256);

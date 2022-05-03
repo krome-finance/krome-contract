@@ -9,7 +9,11 @@ abstract contract TimelockOwnedProxy is Initializable {
     address public nominatedOwner;
     address public timelock_address;
 
-    function initializeTimelockOwned(address _owner, address _timelock_address) internal initializer {
+    function initializeTimelockOwned(address _owner, address _timelock_address) internal onlyInitializing {
+        initializeTimelockOwned_unchained(_owner, _timelock_address);
+    }
+
+    function initializeTimelockOwned_unchained(address _owner, address _timelock_address) internal onlyInitializing {
         require(_owner != address(0), "Owner address cannot be 0");
         owner = _owner;
         timelock_address = _timelock_address;

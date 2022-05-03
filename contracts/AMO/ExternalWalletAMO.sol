@@ -2,11 +2,11 @@
 pragma solidity ^0.8.0;
 
 import "./IAMO.sol";
-import "../Common/LocatorBasedProxy.sol";
+import "../Common/LocatorBasedProxyV2.sol";
 import "../Usdk/IAMOMinter.sol";
 import "../Libs/TransferHelper.sol";
 
-abstract contract ExternalWalletColalteralAMO is LocatorBasedProxy, IAMO {
+abstract contract ExternalWalletColalteralAMO is LocatorBasedProxyV2, IAMO {
 
     /* ========== CONFIGURATION ========== */
     IAMOMinter public amo_minter;
@@ -39,9 +39,16 @@ abstract contract ExternalWalletColalteralAMO is LocatorBasedProxy, IAMO {
         address _locator_address,
         address _amo_minter,
         address _external_wallet
-    ) internal initializer {
-        LocatorBasedProxy.initializeLocatorBasedProxy(_locator_address);
-        
+    ) internal onlyInitializing {
+        LocatorBasedProxyV2.initializeLocatorBasedProxy(_locator_address);
+
+        initializeExternalWalletAMO_unchained(_amo_minter, _external_wallet);
+    }
+
+    function initializeExternalWalletAMO_unchained(
+        address _amo_minter,
+        address _external_wallet
+    ) internal onlyInitializing {
         amo_minter = IAMOMinter(_amo_minter);
         external_wallet_address = _external_wallet;
     }

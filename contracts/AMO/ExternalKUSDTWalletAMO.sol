@@ -106,7 +106,7 @@ contract ExternalKUSDTWalletAMO is ExternalCollateralWalletAMO {
         }
 
         // only CR portion of borrowed USDK is considered as collateral
-        collat_val_e18 = IERC20(amo_minter.collateral_address()).balanceOf(external_wallet_address) * MISSING_PRECISION + tokens_value + eklipse_value_stored + kleva_value_stored + kokoa_value_stored;
+        collat_val_e18 = tokens_value + eklipse_value() + kleva_value() + kokoa_value();
     }
 
     function eklipse_value() public view returns (uint256 value) {
@@ -151,7 +151,7 @@ contract ExternalKUSDTWalletAMO is ExternalCollateralWalletAMO {
             (uint256 locked_amount,) = kokoaLedger.accountInfo(kokoa_bonds[i].collateral_type, external_wallet_address);
 
             IKokoaBond bond = IKokoaBond(kokoa_bonds[i].bond_address);
-            value += bond.toTokenAmount(locked_amount);
+            value += bond.toTokenAmount(locked_amount) * (10 ** (18 - kokoa_bonds[i].decimals));
         }
     }
 
@@ -228,9 +228,9 @@ contract ExternalKUSDTWalletAMO is ExternalCollateralWalletAMO {
         kleva_pool_order[pool_index] = 0;
     }
 
-    function addKokoaBond(bytes32 collateral_type, address bond_token) external onlyByManager {
+    function addKokoaBond(bytes32 collateral_type, address bond_token, uint8 decimals) external onlyByManager {
         require(kokoa_bond_order[collateral_type] == 0, "duplicated collat type");
-        kokoa_bonds.push(KokoaBond(collateral_type, bond_token, ERC20(bond_token).decimals()));
+        kokoa_bonds.push(KokoaBond(collateral_type, bond_token, decimals));
         kokoa_bond_order[collateral_type] = kokoa_bonds.length;
     }
 

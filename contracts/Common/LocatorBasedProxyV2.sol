@@ -16,7 +16,13 @@ abstract contract LocatorBasedProxyV2 is Initializable {
 
     function initializeLocatorBasedProxy(
         address _locator_address
-    ) internal initializer {
+    ) internal onlyInitializing {
+        initializeLocatorBasedProxy_unchained(_locator_address);
+    }
+
+    function initializeLocatorBasedProxy_unchained(
+        address _locator_address
+    ) internal onlyInitializing {
         locator = IAddressLocator(_locator_address);
 
         // for gas saving
