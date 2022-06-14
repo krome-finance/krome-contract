@@ -13,6 +13,6 @@ contract TreasuryERC20_MockV2 is StakingTreasury_ERC20V2 {
     }
 
     function usdkPerLPToken() public override pure returns (uint256) {
-      return 1e18;
+        return 1e18;
     }
 }

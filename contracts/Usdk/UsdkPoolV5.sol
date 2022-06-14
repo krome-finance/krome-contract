@@ -94,13 +94,15 @@ contract UsdkPoolV5 is LocatorBasedProxyV2 {
     uint256[] private recollat_fee; // 6 decimals of precision, divide by 1000000 in calculations for fee
     uint256 public bonus_rate; // Bonus rate on KROME minted during recollateralize(); 6 decimals of precision, set to 0.75% on genesis
     
-
     // Pause variables
     // getters are in collateral_information()
     bool[] private mintPaused; // Collateral-specific
     bool[] private redeemPaused; // Collateral-specific
     bool[] private recollateralizePaused; // Collateral-specific
     bool[] private buyBackPaused; // Collateral-specific
+
+    // added 2022-06-06
+    bool redeemByRealColateralRatio;
 
     /* ========== MODIFIERS ========== */
 
@@ -146,6 +148,8 @@ contract UsdkPoolV5 is LocatorBasedProxyV2 {
         rctMaxKromeOutPerHour = 1000e18;
 
         bonus_rate = 7500; // set to 0.75% on genesis
+
+        redeemByRealColateralRatio = true;
 
         // Core
         syncLocator();
@@ -454,17 +458,25 @@ contract UsdkPoolV5 is LocatorBasedProxyV2 {
         uint256 collat_out,
         uint256 krome_out
     ) {
-        uint256 global_collateral_ratio = IUsdk(usdk_address).global_collateral_ratio();
+        uint256 collateral_ratio = IUsdk(usdk_address).global_collateral_ratio();
+        if (redeemByRealColateralRatio) {
+            uint256 real_collateral_ratio = IUsdk(usdk_address).globalCollateralValue() * PRICE_PRECISION / ERC20(usdk_address).totalSupply();
+
+            if (collateral_ratio > real_collateral_ratio) {
+                collateral_ratio = real_collateral_ratio;
+            }
+        }
+
         uint256 usdk_after_fee = (usdk_amount * (PRICE_PRECISION - redemption_fee[col_idx])) / PRICE_PRECISION;
 
         // Assumes $1 USDK in all cases
-        if(global_collateral_ratio >= PRICE_PRECISION) { 
+        if(collateral_ratio >= PRICE_PRECISION) { 
             // 1-to-1 or overcollateralized
             collat_out = usdk_after_fee * PRICE_PRECISION
                             / collateral_prices[col_idx]
                             / (10 ** (missing_decimals[col_idx])); // missing decimals
             krome_out = 0;
-        } else if (global_collateral_ratio == 0) { 
+        } else if (collateral_ratio == 0) { 
             // Algorithmic
             krome_out = usdk_after_fee
                             * PRICE_PRECISION
@@ -473,12 +485,12 @@ contract UsdkPoolV5 is LocatorBasedProxyV2 {
         } else { 
             // Fractional
             collat_out = usdk_after_fee
-                            * global_collateral_ratio
+                            * collateral_ratio
                             * PRICE_PRECISION
                             / collateral_prices[col_idx]
                             / (10 ** (6 + missing_decimals[col_idx])); // PRICE_PRECISION + missing decimals
             krome_out = usdk_after_fee
-                            * (PRICE_PRECISION - global_collateral_ratio)
+                            * (PRICE_PRECISION - collateral_ratio)
                             / getKromePrice(); // PRICE_PRECISIONS CANCEL OUT
         }
     }
@@ -668,6 +680,10 @@ contract UsdkPoolV5 is LocatorBasedProxyV2 {
         bbkMaxColE18OutPerHour = _bbkMaxColE18OutPerHour;
         rctMaxKromeOutPerHour = _rctMaxKromeOutPerHour;
         emit BbkRctPerHourSet(_bbkMaxColE18OutPerHour, _rctMaxKromeOutPerHour);
+    }
+
+    function setRedeemByRealCollateralRatio(bool _v) external onlyByOwnGov {
+        redeemByRealColateralRatio = _v;
     }
 
     // Set the Price oracles

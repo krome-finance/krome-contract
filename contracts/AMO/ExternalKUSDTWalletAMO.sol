@@ -21,10 +21,20 @@ contract ExternalKUSDTWalletAMO is ExternalCollateralWalletAMO {
         uint8 decimals;
     }
 
+    struct TokenValue {
+        address token_address;
+        uint256 amount;
+    }
+
     struct EklipsePool {
         address eklp_address;
         address swap_address;
         address gauge_address;
+    }
+
+    struct EklipseValue {
+        address eklp_address;
+        uint256 amount;
     }
 
     struct KlevaPool {
@@ -33,10 +43,25 @@ contract ExternalKUSDTWalletAMO is ExternalCollateralWalletAMO {
         uint8 decimals;
     }
 
+    struct KlevaValue {
+        address ib_token_address;
+        uint256 amount;
+    }
+
     struct KokoaBond {
         bytes32 collateral_type;
         address bond_address;
         uint8 decimals;
+    }
+
+    struct KokoaValue {
+        bytes32 collateral_type;
+        uint256 amount;
+    }
+
+    struct BridgedValue {
+        bytes32 where;
+        uint256 amount;
     }
 
     uint256 public eklipse_value_stored;
@@ -51,6 +76,13 @@ contract ExternalKUSDTWalletAMO is ExternalCollateralWalletAMO {
     mapping(uint256 => uint256) kleva_pool_order;
     KokoaBond[] public kokoa_bonds;
     mapping(bytes32 => uint256) kokoa_bond_order;
+
+    // added 2022.05.06
+    uint256 public tokens_value_stored;
+
+    BridgedValue[] public bridged_collaterals;
+    mapping(bytes32 => uint256) bridged_collateral_order;
+    uint256 public bridged_value_stored;
 
     /* ========== INITIALIZER ========== */
 
@@ -100,26 +132,68 @@ contract ExternalKUSDTWalletAMO is ExternalCollateralWalletAMO {
     function dollarBalances() external view returns (uint256 usdk_val_e18, uint256 collat_val_e18) {
         usdk_val_e18 = 0;
 
-        uint256 tokens_value = 0;
-        for (uint256 i = 0; i < stable_tokens.length; i++) {
-            tokens_value += IERC20(stable_tokens[i].token_address).balanceOf(external_wallet_address) * (10 ** (18 - stable_tokens[i].decimals));
-        }
-
         // only CR portion of borrowed USDK is considered as collateral
-        collat_val_e18 = tokens_value + eklipse_value() + kleva_value() + kokoa_value();
+        collat_val_e18 = tokens_value_stored + eklipse_value_stored + kleva_value_stored + kokoa_value_stored + bridged_value_stored;
+    }
+
+    function _token_value(Token memory _entry) internal view returns (uint256) {
+        return IERC20(_entry.token_address).balanceOf(external_wallet_address) * (10 ** (18 - _entry.decimals));
+    }
+
+    function tokens_value() public view returns (uint256 value) {
+        for (uint256 i = 0; i < stable_tokens.length; i++) {
+            value += _token_value(stable_tokens[i]);
+        }
+    }
+
+    function token_values() external view returns (TokenValue[] memory values) {
+        values = new TokenValue[](stable_tokens.length);
+        for (uint256 i = 0; i < stable_tokens.length; i++) {
+            values[i].token_address = stable_tokens[i].token_address;
+            values[i].amount = _token_value(stable_tokens[i]);
+        }
+    }
+
+    function _eklipse_pool_value(EklipsePool memory entry) internal view returns (uint256) {
+        IERC20 eklp = IERC20(entry.eklp_address);
+        IEklipseSwap swap = IEklipseSwap(entry.swap_address);
+        IEklipseGauge eklp_gauge = IEklipseGauge(entry.gauge_address);
+
+        (uint256 deposit_amount,,) = eklp_gauge.userInfo(external_wallet_address);
+
+        return (eklp.balanceOf(external_wallet_address) + deposit_amount) * swap.getVirtualPrice() / 1e18;
     }
 
     function eklipse_value() public view returns (uint256 value) {
         for (uint i = 0; i < eklipse_pools.length; i++) {
             EklipsePool memory entry = eklipse_pools[i];
-            IERC20 eklp = IERC20(entry.eklp_address);
-            IEklipseSwap swap = IEklipseSwap(entry.swap_address);
-            IEklipseGauge eklp_gauge = IEklipseGauge(entry.gauge_address);
-
-            (uint256 deposit_amount,,) = eklp_gauge.userInfo(external_wallet_address);
-
-            value += (eklp.balanceOf(external_wallet_address) + deposit_amount) * swap.getVirtualPrice() / 1e18;
+            value += _eklipse_pool_value(entry);
         }
+    }
+
+    function eklipse_values() external view returns (EklipseValue[] memory values) {
+        values = new EklipseValue[](eklipse_pools.length);
+        for (uint i = 0; i < eklipse_pools.length; i++) {
+            EklipsePool memory entry = eklipse_pools[i];
+            values[i].amount = _eklipse_pool_value(entry);
+            values[i].eklp_address = eklipse_pools[i].eklp_address;
+        }
+ 
+    }
+
+    function _kleva_pool_value(IKlevaStakePool klevaPool, KlevaPool memory entry) internal view returns (uint256) {
+        IKlevaIBToken ibToken = IKlevaIBToken(entry.ib_token_address);
+        uint256 ibTokenPrice;
+        {
+            uint256 totalSupply = ibToken.totalSupply();
+            uint256 totalToken = ibToken.getTotalToken();
+            ibTokenPrice = totalToken * IBTOKEN_PRICE_PRECISTION / totalSupply;
+        }
+
+        uint256 ibTokenBalance = ibToken.balanceOf(external_wallet_address);
+        (uint256 ibTokenDeposited,,) = klevaPool.userInfos(entry.pool_index, external_wallet_address);
+
+        return (ibTokenBalance + ibTokenDeposited) * (10 ** (18 - entry.decimals)) * ibTokenPrice / IBTOKEN_PRICE_PRECISTION;
     }
 
     function kleva_value() public view returns (uint256) {
@@ -129,33 +203,61 @@ contract ExternalKUSDTWalletAMO is ExternalCollateralWalletAMO {
 
         uint256 value = 0;
         for (uint i = 0; i < kleva_pools.length; i++) {
-            IKlevaIBToken ibToken = IKlevaIBToken(kleva_pools[i].ib_token_address);
-            uint256 ibTokenPrice;
-            {
-                uint256 totalSupply = ibToken.totalSupply();
-                uint256 totalToken = ibToken.getTotalToken();
-                ibTokenPrice = totalToken * IBTOKEN_PRICE_PRECISTION / totalSupply;
-            }
-
-            uint256 ibTokenBalance = ibToken.balanceOf(external_wallet_address);
-            (uint256 ibTokenDeposited,,) = klevaPool.userInfos(kleva_pools[i].pool_index, external_wallet_address);
-
-            value += (ibTokenBalance + ibTokenDeposited) * (10 ** (18 - kleva_pools[i].decimals)) * ibTokenPrice / IBTOKEN_PRICE_PRECISTION;
+            value += _kleva_pool_value(klevaPool, kleva_pools[i]);
         }
 
         return value;
     }
 
-    function kokoa_value() public view returns (uint256 value) {
-        for (uint i = 0; i < kokoa_bonds.length; i++) {
-            (uint256 locked_amount,) = kokoaLedger.accountInfo(kokoa_bonds[i].collateral_type, external_wallet_address);
-
-            IKokoaBond bond = IKokoaBond(kokoa_bonds[i].bond_address);
-            value += bond.toTokenAmount(locked_amount) * (10 ** (18 - kokoa_bonds[i].decimals));
+    function kleva_values() external view returns (KlevaValue[] memory values) {
+        address kleva_pool_address = locator.kleva_pool();
+        if (kleva_pool_address == address(0)) return new KlevaValue[](0);
+        IKlevaStakePool klevaPool = IKlevaStakePool(kleva_pool_address);
+        
+        values = new KlevaValue[](kleva_pools.length);
+        for (uint i = 0; i < kleva_pools.length; i++) {
+            values[i].ib_token_address = kleva_pools[i].ib_token_address;
+            values[i].amount = _kleva_pool_value(klevaPool, kleva_pools[i]);
         }
     }
 
+    function _kokoa_bond_value(KokoaBond memory _entry) internal view returns (uint256) {
+        (uint256 locked_amount,) = kokoaLedger.accountInfo(_entry.collateral_type, external_wallet_address);
+
+        IKokoaBond bond = IKokoaBond(_entry.bond_address);
+        return bond.toTokenAmount(locked_amount) * (10 ** (18 - _entry.decimals));
+
+    }
+
+    function kokoa_value() public view returns (uint256 value) {
+        for (uint i = 0; i < kokoa_bonds.length; i++) {
+            value += _kokoa_bond_value(kokoa_bonds[i]);
+        }
+    }
+
+    function kokoa_values() external view returns (KokoaValue[] memory values) {
+        values = new KokoaValue[](kokoa_bonds.length);
+        for (uint i = 0; i < kokoa_bonds.length; i++) {
+            values[i].collateral_type = kokoa_bonds[i].collateral_type;
+            values[i].amount = _kokoa_bond_value(kokoa_bonds[i]);
+        }
+    }
+
+    function bridged_value() public view returns (uint256 value) {
+        for (uint i = 0; i < bridged_collaterals.length; i++) {
+            value += bridged_collaterals[i].amount;
+        }
+    }
+
+    function bridged_values() public view returns (BridgedValue[] memory values) {
+        return bridged_collaterals;
+    }
+
     /* ========== SYNC ========== */
+
+    function syncStableTokens() public {
+        tokens_value_stored = tokens_value();
+    }
 
     function syncEklipse() public {
         eklipse_value_stored = eklipse_value();
@@ -169,10 +271,16 @@ contract ExternalKUSDTWalletAMO is ExternalCollateralWalletAMO {
         kokoa_value_stored = kokoa_value();
     }
 
+    function syncBridgedValue() internal {
+        bridged_value_stored = bridged_value();
+    }
+
     function sync() external {
+        syncStableTokens();
         syncEklipse();
         syncKleva();
         syncKokoa();
+        syncBridgedValue();
     }
 
     /* ========== MANAGE ========== */
@@ -243,5 +351,30 @@ contract ExternalKUSDTWalletAMO is ExternalCollateralWalletAMO {
         }
         kokoa_bonds.pop();
         kokoa_bond_order[collateral_type] = 0;
+    }
+
+    function setBridgedValue(bytes32 _where, uint256 _value) external onlyByManager {
+        uint256 order = bridged_collateral_order[_where];
+        if (order > 0) {
+            uint256 idx = order - 1;
+            bridged_collaterals[idx].amount = _value;
+        } else {
+            bridged_collaterals.push(BridgedValue({
+                where: _where,
+                amount: _value
+            }));
+            bridged_collateral_order[_where] = bridged_collaterals.length;
+        }
+    }
+
+    function removeBridgedValue(bytes32 _where) external onlyByManager {
+        require(bridged_collateral_order[_where] > 0, "unknown collat type");
+        uint256 order = bridged_collateral_order[_where];
+        if (order < bridged_collaterals.length) {
+            bridged_collaterals[order - 1] = bridged_collaterals[bridged_collaterals.length - 1];
+            bridged_collateral_order[bridged_collaterals[order - 1].where] = order;
+        }
+        bridged_collaterals.pop();
+        bridged_collateral_order[_where] = 0;
     }
 }

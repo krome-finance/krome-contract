@@ -2,7 +2,7 @@
 pragma solidity ^0.8.0;
 
 import "../Common/Context.sol";
-import "../Common/TimelockOwnedProxy.sol";
+import "../Common/LocatorBasedProxyV2.sol";
 import "../ERC20/IERC20.sol";
 import "../Libs/TransferHelper.sol";
 import "../Math/Math.sol";
@@ -10,6 +10,11 @@ import "../Math/Math.sol";
 interface IFarm {
     function collectRewardFor(address) external returns (uint256[] memory);
     function withdrawLockedFor(address, bytes32) external;
+    function reward_comptroller() external view returns (address);
+}
+
+interface IRewardComptroller {
+    function getAllRewardTokens() external view returns (address[] memory);
 }
 
 interface IVeKrome {
@@ -30,7 +35,7 @@ interface ISourceDelegator {
     function collectedRewardsPage(address account, address farm, uint256 start, uint256 length) external view returns (Reward[] memory);
 }
 
-contract KromeRewardForStakingDelegatorV2 is Context, TimelockOwnedProxy {
+contract KromeRewardForStakingDelegatorV2 is Context, LocatorBasedProxyV2 {
     address public krome_address;
     address public vekrome_address;
     address public custodian_address;
@@ -90,13 +95,12 @@ contract KromeRewardForStakingDelegatorV2 is Context, TimelockOwnedProxy {
 
 
     function initialize(
-        address _krome_address,
+        address _locator_address,
         address _vekrome_address,
-        address _timelock_address,
         address _custodian_address
     ) external initializer {
-        TimelockOwnedProxy.initializeTimelockOwned(msg.sender, _timelock_address);
-        krome_address = _krome_address;
+        LocatorBasedProxyV2.initializeLocatorBasedProxy(_locator_address);
+        krome_address = locator.krome();
         vekrome_address = _vekrome_address;
         custodian_address = _custodian_address;
 
@@ -127,15 +131,27 @@ contract KromeRewardForStakingDelegatorV2 is Context, TimelockOwnedProxy {
 
     /* ================ MUTATIVE FUNCTIONS =============== */
 
-    function _collectReward(address farm) internal returns (uint256) {
+    function _collectReward(address _farm_address) internal returns (uint256) {
         _handle_queued();
 
+        IFarm farm = IFarm(_farm_address);
+        IRewardComptroller reward_comptroller = IRewardComptroller(farm.reward_comptroller());
+
+        address[] memory reward_tokens = reward_comptroller.getAllRewardTokens();
+
         uint256 balance0 = IERC20(krome_address).balanceOf(address(this));
-        uint256[] memory rewards = IFarm(farm).collectRewardFor(msg.sender);
+        uint256[] memory rewards = farm.collectRewardFor(msg.sender);
         uint256 balance = IERC20(krome_address).balanceOf(address(this));
 
-        require(rewards.length == 1, "reward length mismatch");
-        require(balance - balance0 == rewards[0], "reward balance");
+        require(rewards.length == reward_tokens.length, "reward length mismatch");
+
+        for (uint i = 0; i < reward_tokens.length; i++) {
+            if (reward_tokens[i] == krome_address) {
+                require(balance - balance0 == rewards[i], "reward balance");
+            } else {
+                TransferHelper.safeTransfer(reward_tokens[i], msg.sender, rewards[i]);
+            }
+        }
 
         return rewards[0];
     }

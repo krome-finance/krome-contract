@@ -87,6 +87,20 @@ contract TokenVesting {
     }
 
     /**
+     * @return the owner of the contract.
+     */
+    function getOwner() public view returns (address) {
+        return _owner;
+    }
+
+    /**
+     * @return the timelock address of the contract.
+     */
+    function getTimelock() public view returns (address) {
+        return _timelock_address;
+    }
+
+    /**
      * @return the cliff time of the token vesting.
      */
     function getCliff() public view returns (uint256) {
@@ -129,6 +143,14 @@ contract TokenVesting {
     }
 
     /**
+     * @return total amount that released and to be released
+     */
+    function getTotalAmount() external view returns (uint256) {
+        uint256 currentBalance = IERC20(_token_contract_address).balanceOf(address(this));
+        return currentBalance + _released;
+    }
+
+    /**
      * @notice Transfers vested tokens to beneficiary.
      */
     function release() public {
@@ -167,7 +189,7 @@ contract TokenVesting {
 
     // Added to support recovering possible airdrops
     function recoverERC20(address tokenAddress, uint256 tokenAmount) external {
-        require(msg.sender == _beneficiary, "Must be called by the beneficiary");
+        require(msg.sender == _beneficiary || msg.sender == _owner, "Must be called by the beneficiary or owner");
 
         // Cannot recover the staking token or the rewards token
         require(tokenAddress != _token_contract_address, "Cannot withdraw the token through this function");
@@ -179,7 +201,12 @@ contract TokenVesting {
      * @dev Calculates the amount that has already vested but hasn't been released yet.
      */
     function _releasableAmount() private view returns (uint256) {
-        return _vestedAmount() - _released;
+        uint256 vested = _vestedAmount();
+        if (vested <= _released) {
+            return 0;
+        } else {
+            return _vestedAmount() - _released;
+        }
     }
 
     /**
@@ -187,7 +214,7 @@ contract TokenVesting {
      */
     function _vestedAmount() private view returns (uint256) {
         uint256 currentBalance = IERC20(_token_contract_address).balanceOf(address(this));
-        uint256 totalBalance = currentBalance + (_released);
+        uint256 totalBalance = currentBalance + _released;
         if (block.timestamp < _cliff) {
             return 0;
         } else if (block.timestamp >= _start + _duration || _revoked) {
@@ -195,6 +222,25 @@ contract TokenVesting {
         } else {
             return totalBalance * (block.timestamp - _start) / _duration;
         }
+    }
+
+    function deposit(uint256 amount) external {
+        TransferHelper.safeTransferFrom(_token_contract_address, msg.sender, address(this), amount);
+    }
+
+    function setDuration(uint256 start, uint256 cliffDuration, uint256 duration) external {
+        require(msg.sender == _timelock_address, "Must be called by the timelock contract");
+        require(cliffDuration <= duration, "TokenVesting: cliff is longer than duration");
+        require(duration > 0, "TokenVesting: duration is 0");
+
+        _duration = duration;
+        _cliff = start + (cliffDuration);
+        _start = start;
+    }
+
+    function transferToken(uint256 amount) external {
+        require(msg.sender == _owner, "Must be called by the timelock contract");
+        TransferHelper.safeTransfer(_token_contract_address, _beneficiary, amount);
     }
 
     uint256[44] private __gap;
