@@ -36,7 +36,6 @@ contract TokenVesting {
     uint256 private _duration;
 
     address public _token_contract_address;
-    address public _timelock_address;
     bool public _revocable;
 
     uint256 private _released;
@@ -59,8 +58,7 @@ contract TokenVesting {
         uint256 cliffDuration,
         uint256 duration,
         bool revocable,
-        address owner_address,
-        address timelock_address
+        address owner_address
     ) {
         require(beneficiary != address(0), "TokenVesting: beneficiary is the zero address");
         // solhint-disable-next-line max-line-length
@@ -76,7 +74,7 @@ contract TokenVesting {
         _cliff = start + (cliffDuration);
         _start = start;
         _owner = owner_address;
-        _timelock_address = timelock_address;
+        // _timelock_address = timelock_address;
     }
 
     /**
@@ -93,12 +91,12 @@ contract TokenVesting {
         return _owner;
     }
 
-    /**
-     * @return the timelock address of the contract.
-     */
-    function getTimelock() public view returns (address) {
-        return _timelock_address;
-    }
+    // /**
+    //  * @return the timelock address of the contract.
+    //  */
+    // function getTimelock() public view returns (address) {
+    //     return _timelock_address;
+    // }
 
     /**
      * @return the cliff time of the token vesting.
@@ -142,10 +140,38 @@ contract TokenVesting {
         return _revoked;
     }
 
+    struct Info {
+        address token;
+        address beneficiary;
+        bool revocable;
+        bool revoked;
+
+        uint256 start;
+        uint256 cliff;
+        uint256 duration;
+
+        uint256 total;
+        uint256 released;
+        uint256 releasable;
+    }
+
+    function getInfo() external view returns (Info memory info) {
+        info.token = _token_contract_address;
+        info.beneficiary = _beneficiary;
+        info.revocable = _revocable;
+        info.revoked = _revoked;
+        info.start = _start;
+        info.cliff = _cliff;
+        info.duration = _duration;
+        info.total = getTotalAmount();
+        info.released = _released;
+        info.releasable = _releasableAmount();
+    }
+
     /**
      * @return total amount that released and to be released
      */
-    function getTotalAmount() external view returns (uint256) {
+    function getTotalAmount() public view returns (uint256) {
         uint256 currentBalance = IERC20(_token_contract_address).balanceOf(address(this));
         return currentBalance + _released;
     }
@@ -171,7 +197,7 @@ contract TokenVesting {
      * remain in the contract, the rest are returned to the owner.
      */
     function revoke() public {
-        require(msg.sender == _timelock_address, "Must be called by the timelock contract");
+        require(msg.sender == _owner, "Must be called by the owner");
         require(_revocable, "TokenVesting: cannot revoke");
         require(!_revoked, "TokenVesting: token already revoked");
 
@@ -229,7 +255,7 @@ contract TokenVesting {
     }
 
     function setDuration(uint256 start, uint256 cliffDuration, uint256 duration) external {
-        require(msg.sender == _timelock_address, "Must be called by the timelock contract");
+        require(msg.sender == _owner, "Must be called by the owner");
         require(cliffDuration <= duration, "TokenVesting: cliff is longer than duration");
         require(duration > 0, "TokenVesting: duration is 0");
 
@@ -239,7 +265,7 @@ contract TokenVesting {
     }
 
     function transferToken(uint256 amount) external {
-        require(msg.sender == _owner, "Must be called by the timelock contract");
+        require(msg.sender == _owner, "Must be called by the owner");
         TransferHelper.safeTransfer(_token_contract_address, _beneficiary, amount);
     }
 

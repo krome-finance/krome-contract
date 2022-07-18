@@ -131,12 +131,12 @@ contract KromeStablecoin is ERC20Custom, ERC20KIP7, TimelockOwned {
         return __eth_usd_price * price_in_eth / (uint256(10)**eth_usd_pricer_decimals) / 1000;
     }
 
-    // Returns X USDK = 1 USD in 1e6
+    // Returns 1 USDK = X USD in 1e6
     function usdk_price() public view returns (uint256) {
         return oracle_price(PriceChoice.USDK);
     }
 
-    // Returns X KROME = 1 USD in 1e6
+    // Returns 1 KROME = X USD in 1e6
     function krome_price() public view returns (uint256) {
         return oracle_price(PriceChoice.KROME);
     }

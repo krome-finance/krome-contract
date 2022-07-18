@@ -14,6 +14,7 @@ pragma solidity ^0.8.0;
 
 interface IStakingBoostController {
     function lockMultiplier(uint256 secs) external view returns (uint256);
+    function lock_time_for_max_multiplier() external view returns (uint256);
     function minVeKromeForMaxBoost(uint256 stakedUsdk) external view returns (uint256);
     function veKromeMultiplier(address account, uint256 stakedUsdk) external view returns (uint256 vekrome_multiplier, uint256 slope, uint256 stay_time);
 }

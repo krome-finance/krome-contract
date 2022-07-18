@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 pragma solidity ^0.8.0;
 
-import "../StakingTreasury_ERC20V4.sol";
+import "../StakingTreasury_ERC20V5.sol";
 
 interface I4ISwap {
     function token() external view returns (address);
@@ -10,7 +10,7 @@ interface I4ISwap {
     function getVirtualPrice() external view returns (uint256);
 }
 
-contract TreasuryUsdkI4IPool is StakingTreasury_ERC20V4 {
+contract TreasuryUsdkI4IPool is StakingTreasury_ERC20V5 {
     I4ISwap public swap;
     IERC20 public lp;
     uint256 public usdk_index;
@@ -22,7 +22,7 @@ contract TreasuryUsdkI4IPool is StakingTreasury_ERC20V4 {
     ) public initializer {
         swap = I4ISwap(_i4i_swap);
         address lp_token = swap.token();
-        StakingTreasury_ERC20V4.__StakingTreasury_init(_locator_address, _staking_boost_controller, lp_token);
+        StakingTreasury_ERC20V5.__StakingTreasury_init(_locator_address, _staking_boost_controller, lp_token);
 
         lp = IERC20(lp_token);
         usdk_index = swap.coinIndex(locator.usdk());

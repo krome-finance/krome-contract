@@ -147,6 +147,9 @@ contract StakingRewardComptrollerV4 is LocatorBasedProxyV2, ReentrancyGuardUpgra
     bool private _entered;
     uint256[] public nextRewardRatesManual;
 
+    bool public skip_reward_balance_validation;
+    uint256 public nextRewardTimestamp;
+
     /* ========== STRUCTURE ========== */
 
     /* ========== MODIFIERS ========== */
@@ -156,7 +159,7 @@ contract StakingRewardComptrollerV4 is LocatorBasedProxyV2, ReentrancyGuardUpgra
     }
 
     modifier onlyByOwnGov() {
-        require(msg.sender == owner || msg.sender == timelock_address, "Not owner or timelock");
+        require(msg.sender == owner || msg.sender == timelock_address || msg.sender == local_manager_address, "Not owner or timelock");
         _;
     }
 
@@ -166,6 +169,11 @@ contract StakingRewardComptrollerV4 is LocatorBasedProxyV2, ReentrancyGuardUpgra
     }
 
     /* ========== CONSTRUCTOR ========== */
+
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
 
     function initialize (
         address _locator_address,
@@ -360,6 +368,13 @@ contract StakingRewardComptrollerV4 is LocatorBasedProxyV2, ReentrancyGuardUpgra
         }
         else {
             rwd_rate = rewardRatesManual[token_idx];
+        }
+    }
+
+    function getAllRewardRates() public view returns (uint256[] memory rwd_rates) {
+        rwd_rates = new uint256[](rewardTokens.length);
+        for (uint token_idx = 0; token_idx < rewardTokens.length; token_idx++) {
+            rwd_rates[token_idx] = rewardRates(token_idx);
         }
     }
 
@@ -559,7 +574,9 @@ contract StakingRewardComptrollerV4 is LocatorBasedProxyV2, ReentrancyGuardUpgra
         _updateStoredRewardsAndTime();
 
         // Pull in rewards from the rewards distributor
-        rewards_distributor.distributeReward(address(this));
+        if (address(rewards_distributor) != address(0)) {
+            rewards_distributor.distributeReward(address(this));
+        }
 
         // Ensure the provided reward amount is not more than the balance in the contract.
         // This keeps the reward rate in the right range, preventing overflows due to
@@ -573,13 +590,16 @@ contract StakingRewardComptrollerV4 is LocatorBasedProxyV2, ReentrancyGuardUpgra
             address gauge_controller_address = gaugeControllers[i];
             if (gauge_controller_address != address(0)) {
                 last_gauge_reward_rates[i] = IGaugeController(gauge_controller_address).global_emission_rate() * last_gauge_relative_weights[i] / 1e18;
-            } else {
+            }
+            if (block.timestamp >= nextRewardTimestamp) {
                 rewardRatesManual[i] = nextRewardRatesManual[i];
             }
 
             // rewards should be include thos period's
             uint256 newReward = rewardRates(i) * rewardsDuration * num_periods_elapsed;
-            require(rewardAccumulated[i] + newReward <= IERC20(rewardTokens[i]).balanceOf(address(this)) + rewardClaimed[i], string(abi.encodePacked("Not enough reward tokens available: ", addressToString(rewardTokens[i]))) );
+            if (!skip_reward_balance_validation) {
+                require(rewardAccumulated[i] + newReward <= IERC20(rewardTokens[i]).balanceOf(address(this)) + rewardClaimed[i], string(abi.encodePacked("Not enough reward tokens available: ", addressToString(rewardTokens[i]))) );
+            }
             rewardAccumulated[i] += newReward;
         }
 
@@ -690,6 +710,13 @@ contract StakingRewardComptrollerV4 is LocatorBasedProxyV2, ReentrancyGuardUpgra
         }
     }
 
+    function setPeriodFinish(uint256 _periodFinish) external onlyByOwnGov {
+        require(_periodFinish > block.timestamp, "already past time");
+        periodFinish = _periodFinish;
+
+        emit SetPeriodFinish(_periodFinish);
+    }
+
     function setRewardDuration(uint256 duration) external onlyByOwnGov {
         require(duration > 0, "invalid duration");
         rewardsDuration = duration;
@@ -739,9 +766,20 @@ contract StakingRewardComptrollerV4 is LocatorBasedProxyV2, ReentrancyGuardUpgra
     }
 
     // The owner or the reward token managers can set reward rates 
-    function setNextRewardRate(address reward_token_address, uint256 new_rate) external {
+    function setNextRewardRateFrom(address reward_token_address, uint256 new_rate, uint256 from_timestamp) public {
         _onlyTknMgrs(reward_token_address);
+        sync();
         nextRewardRatesManual[rewardTokenAddrToIdx[reward_token_address]] = new_rate;
+        nextRewardTimestamp = from_timestamp;
+    }
+
+    // The owner or the reward token managers can set reward rates 
+    function setNextRewardRate(address reward_token_address, uint256 new_rate) external {
+        setNextRewardRateFrom(reward_token_address, new_rate, 0);
+    }
+
+    function setSkipRewardBalanceValidation(bool v) external onlyByOwnGov {
+        skip_reward_balance_validation = v;
     }
 
     // The owner or the reward token managers can set reward rates 
@@ -799,6 +837,7 @@ contract StakingRewardComptrollerV4 is LocatorBasedProxyV2, ReentrancyGuardUpgra
     /* ========== EVENTS ========== */
     event SetMigrator(address migrator_address, bool v);
     event SetRewardDuration(uint256 duration);
+    event SetPeriodFinish(uint256 periodFinish);
 
     /* ========== A CHICKEN ========== */
     //

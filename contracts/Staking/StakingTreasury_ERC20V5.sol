@@ -21,13 +21,13 @@ interface IRewardComptroller {
     function sync() external;
 }
 
-abstract contract LpMigrationTreasury_ERC20 is ContextUpgradeable, ReentrancyGuardUpgradeable, LocatorBasedProxyV2 {
+abstract contract StakingTreasury_ERC20V5 is ContextUpgradeable, ReentrancyGuardUpgradeable, LocatorBasedProxyV2 {
     // using SafeERC20 for IERC20;
 
     // Constant for various precisions
     uint256 public constant MULTIPLIER_PRECISION = 1e18;
 
-    /* ========== CONFIG VARIABLES ========== */
+    /* ========== STATE VARIABLES ========== */
 
     IStakingBoostController public boost_controller;
     IRewardComptroller public reward_comptroller;
@@ -35,23 +35,10 @@ abstract contract LpMigrationTreasury_ERC20 is ContextUpgradeable, ReentrancyGua
     address public lp_token_address;
     uint256 private lp_token_precision;
 
-    uint256 public closed_at; // after closed, no stake/add/extend allowed
-    uint256 public lock_end; // minimum lock end time that stakes should be locked
-
-    // Admin booleans for emergencies, migrations, and overrides
-    bool public stakesUnlocked; // Release locked stakes in case of emergency
-    bool public migrationsOn; // Used for migrations. Prevents new stakes, but allows LP and reward withdrawals
-    bool public withdrawalsPaused; // For emergencies
-    bool public stakingPaused; // For emergencies
-    bool public updateStakingPaused; // For emergencies
-    bool public rewardsCollectionPaused; // For emergencies
-
-    /* ========== STATE VARIABLES ========== */
-
     uint256 public usdkPerLPStored;
 
     // Stake tracking
-    mapping(address => LockedStake) public lockedStakes;
+    mapping(address => LockedStake[]) public lockedStakes;
     mapping(address => uint256) public _locked_liquidity;
     // mapping(address => VeKromeMultiplier) public veMultipliers;
     uint256 internal _total_liquidity_locked;
@@ -62,22 +49,23 @@ abstract contract LpMigrationTreasury_ERC20 is ContextUpgradeable, ReentrancyGua
     // List of valid migrators (set by governance)
     mapping(address => bool) public valid_migrators;
 
+    // Stakers set which migrator(s) they want to use
+    mapping(address => mapping(address => bool)) public staker_allowed_migrators;
+
+    // Admin booleans for emergencies, migrations, and overrides
+    bool public stakesUnlocked; // Release locked stakes in case of emergency
+    bool public migrationsOn; // Used for migrations. Prevents new stakes, but allows LP and reward withdrawals
+    bool public withdrawalsPaused; // For emergencies
+    bool public stakingPaused; // For emergencies
+    bool public updateStakingPaused; // For emergencies
+    bool public rewardsCollectionPaused; // For emergencies
+
+    bool public allowUnlockedStake; // = false;
+
     address public collect_reward_delegator;
 
-    StakeMigration[] public stakes_to_migrate_array;
-    uint256 public index_to_migrate;
-    uint256 public migrated_liquidity;
-
-    mapping(address => uint256) public migrated_user_liquidity;
-
-    uint256 lpRewardDueTimestamp;
-    uint256 totalLpWeightSynced;
-    uint256 totalLpWeightSyncTimestamp;
-
-    mapping(address => uint256) userLpWeightSynced;
-    mapping(address => uint256) userLpWeightSyncTimestamp;
-
-    LpReward[] totalLpRewards;
+    address[] stakers_array;
+    mapping(address => uint256) stakers_order;
 
     /* ========== STRUCTS ========== */
 
@@ -97,16 +85,6 @@ abstract contract LpMigrationTreasury_ERC20 is ContextUpgradeable, ReentrancyGua
         uint256 lock_multiplier; // 18 decimals of precision. 1x = E18, 1x ~ (1+lock_max_multiplier)x
     }
 
-    struct StakeMigration {
-        address account;
-        bytes32 kek_id;
-    }
-
-    struct LpReward {
-        address token_address;
-        uint256 amount;
-    }
-
     /* ========== MODIFIERS ========== */
 
     modifier onlyByOwnGov() {
@@ -117,7 +95,6 @@ abstract contract LpMigrationTreasury_ERC20 is ContextUpgradeable, ReentrancyGua
     modifier updateRewardAndBalance(address account, bool sync_too) {
         _require_reward_comptroller();
         syncInternal();
-        syncUserLpWeight(account);
         if (_locked_liquidity[account] > 0) {
             reward_comptroller.updateRewardAndBalance(account, sync_too);
         }
@@ -130,36 +107,26 @@ abstract contract LpMigrationTreasury_ERC20 is ContextUpgradeable, ReentrancyGua
 
     /* ========== INITIALIZER ========== */
 
-    function __LpMigrationTreasury_init(
+    function __StakingTreasury_init(
         address _locator_address,
         address _staking_boost_controller,
-        address _staking_token,
-        uint256 _closed_at,
-        uint256 _lockend
+        address _staking_token
     ) internal onlyInitializing {
         LocatorBasedProxyV2.initializeLocatorBasedProxy(_locator_address);
-        __LpMigrationTreasury_init_unchained(_staking_boost_controller, _staking_token, _closed_at, _lockend);
+        __StakingTreasury_init_unchained(_staking_boost_controller, _staking_token);
     }
 
-    function __LpMigrationTreasury_init_unchained(
+    function __StakingTreasury_init_unchained(
         address _staking_boost_controller,
-        address _staking_token,
-        uint256 _closed_at,
-        uint256 _lockend
+        address _staking_token
     ) internal onlyInitializing {
         boost_controller = IStakingBoostController(_staking_boost_controller);
         lp_token_address = _staking_token;
         lp_token_precision = 10 ** IERC20Decimals(_staking_token).decimals();
 
-        closed_at = _closed_at;
-        lock_end = _lockend;
-
         // Other booleans
         stakesUnlocked = false;
-
-        // withdrawal is puased for default options.
-        // allow withdrawal on emmergency situation before migrated
-        withdrawalsPaused = true;
+        allowUnlockedStake = false;
     }
 
     /* ============ ABSTRACT =========== */
@@ -174,24 +141,14 @@ abstract contract LpMigrationTreasury_ERC20 is ContextUpgradeable, ReentrancyGua
     // ------ LOCK RELATED ------
 
     // All the locked stakes for a given account
-    function lockedStakesOf(address account) external view returns (LockedStake[] memory stakes) {
-        if (_locked_liquidity[account] > migrated_user_liquidity[account]) {
-            stakes = new LockedStake[](1);
-            stakes[0] = lockedStakes[account];
-        }
-    }
-
-    function lockedStakesOfRaw(address account) external view returns (LockedStake[] memory stakes) {
-        if (_locked_liquidity[account] > 0) {
-            stakes = new LockedStake[](1);
-            stakes[0] = lockedStakes[account];
-        }
+    function lockedStakesOf(address account) external view returns (LockedStake[] memory) {
+        return lockedStakes[account];
     }
 
     // // All the locked stakes for a given account [old-school method]
     // function lockedStakesOfMultiArr(address account) external view returns (
     //     bytes32[] memory kek_ids,
-    //     uint256[] memory start_timestamps,]a
+    //     uint256[] memory start_timestamps,
     //     uint256[] memory liquidities,
     //     uint256[] memory ending_timestamps,
     //     uint256[] memory lock_multipliers
@@ -208,15 +165,11 @@ abstract contract LpMigrationTreasury_ERC20 is ContextUpgradeable, ReentrancyGua
 
     // Returns the length of the locked stakes for a given account
     function lockedStakesOfLength(address account) external view returns (uint256) {
-        return _locked_liquidity[account] > migrated_user_liquidity[account] ? 1 : 0;
-    }
-
-    function lockedStakesOfLengthRaw(address account) external view returns (uint256) {
-        return _locked_liquidity[account] > 0 ? 1 : 0;
+        return lockedStakes[account].length;
     }
 
     function veKromeMultiplier(address account) external view returns (uint256 ve_multiplier, uint256 slope, uint256 stay_time) {
-        return userStakedUsdk(account) > 0 ? boost_controller.veKromeMultiplier(account, userStakedUsdk(account)) : (0, 0, 0);
+        return boost_controller.veKromeMultiplier(account, userStakedUsdk(account));
     }
 
     // ------ USDK RELATED ------
@@ -226,149 +179,115 @@ abstract contract LpMigrationTreasury_ERC20 is ContextUpgradeable, ReentrancyGua
     }
 
     function userStakedUsdk(address account) public view returns (uint256) {
-        return _locked_liquidity[account] > migrated_user_liquidity[account] ? usdkForStake(_locked_liquidity[account]) : 0;
+        return usdkForStake(_locked_liquidity[account]);
     }
 
     // ------ LIQUIDITY RELATED ------
 
     // Total locked liquidity / LP tokens
     function totalLiquidityLocked() external view returns (uint256) {
-        return _total_liquidity_locked - migrated_liquidity;
-    }
-
-    // Total locked liquidity / LP tokens
-    function totalLiquidityLockedRaw() external view returns (uint256) {
         return _total_liquidity_locked;
     }
 
     // User locked liquidity / LP tokens
     function lockedLiquidityOf(address account) external view returns (uint256) {
-        return _locked_liquidity[account] - migrated_user_liquidity[account];
-    }
-
-    function lockedLiquidityOfRaw(address account) external view returns (uint256) {
         return _locked_liquidity[account];
     }
 
-    function getStakesToMigrateCount() external view returns (uint256) {
-        return stakes_to_migrate_array.length - index_to_migrate;
+    function getStakerLength() external view returns (uint256) {
+        return stakers_array.length;
     }
 
-    function getStakesToMigrate(uint256 length) external view returns (address[] memory stakers, LockedStake[] memory stakes) {
-        uint256 queue_length = stakes_to_migrate_array.length;
-        uint256 start_idx = index_to_migrate;
-        uint256 result_length = queue_length > start_idx ? Math.min(queue_length - start_idx, length) : 0;
-
-        stakers = new address[](result_length);
-        stakes = new LockedStake[](result_length);
-
-        for (uint256 i = 0; i < result_length; i++) {
-            StakeMigration memory migration = stakes_to_migrate_array[start_idx + i];
-            stakers[i] = migration.account;
-            stakes[i] = lockedStakes[migration.account];
-            require(lockedStakes[migration.account].kek_id == migration.kek_id, "invalid kek_id");
-        }
-    }
-
-    function getMigrationsLength() external view returns (uint256) {
-        return stakes_to_migrate_array.length;
-    }
-
-    function getMigrations(uint256 start_idx, uint256 length) external view returns (StakeMigration[] memory migrations) {
-        uint256 queue_length = stakes_to_migrate_array.length;
-        uint256 result_length = queue_length > start_idx ? Math.min(queue_length - start_idx, length) : 0;
-
-        migrations = new StakeMigration[](result_length);
-        for (uint256 i = 0; i < result_length; i++) {
-            migrations[i] = stakes_to_migrate_array[start_idx + i];
-        }
-    }
-
-    function lpWeightFor(address account) public view returns (uint256 userWeight, uint256 totalWeight) {
-        totalWeight = totalLpWeightSynced;
-        userWeight = userLpWeightSynced[account];
-
-        uint256 timeCriteria = lpRewardDueTimestamp > 0 ? Math.min(lpRewardDueTimestamp, block.timestamp) : block.timestamp;
-
-        if (_total_liquidity_locked > 0 && totalLpWeightSyncTimestamp > 0) {
-            totalWeight += _total_liquidity_locked * (timeCriteria - totalLpWeightSyncTimestamp);
-        }
-        if (_locked_liquidity[account] > 0 && userLpWeightSyncTimestamp[account] > 0) {
-            userWeight += _locked_liquidity[account] * (timeCriteria - userLpWeightSyncTimestamp[account]);
-        }
-    }
-
-    function lpRewardsFor(address account) public view returns (LpReward[] memory rewards) {
-        rewards = new LpReward[](totalLpRewards.length);
-
-        (uint256 userWeight, uint256 totalWeight) = lpWeightFor(account);
-
-        for (uint256 i = 0; i < rewards.length; i++) {
-            rewards[i] = LpReward({
-                token_address: totalLpRewards[i].token_address,
-                amount: totalWeight > 0 ? totalLpRewards[i].amount * userWeight / totalWeight : 0
-            });
+    function getStakers(uint256 pos, uint256 length) external view returns (address[] memory stakers) {
+        uint256 stakers_length = stakers_array.length;
+        stakers = new address[](pos < stakers_array.length ? Math.min(stakers_length - pos, length) : 0);
+        for (uint256 i = 0; i < stakers.length; i++) {
+            stakers[i] = stakers_array[pos + i];
         }
     }
 
     /* =============== MUTATIVE FUNCTIONS =============== */
 
+    // stakers array
+    function _addStaker(address account) internal {
+        if (stakers_order[account] == 0) {
+            stakers_array.push(account);
+            stakers_order[account] = stakers_array.length;
+        }
+    }
+
+    function _removeStaker(address account) internal {
+        uint256 staker_order = stakers_order[account];
+
+        if (staker_order == 0) return;
+
+        uint256 last_index = stakers_array.length - 1;
+        if (staker_order <= last_index) {
+
+            address last_staker = stakers_array[last_index];
+
+            stakers_array[staker_order - 1] = last_staker;
+            stakers_order[last_staker] = staker_order;
+        }
+
+        stakers_array.pop();
+        stakers_order[account] = 0;
+    }
+
     // ------ STAKING ------
 
     function _getStake(address staker_address, bytes32 kek_id) internal view returns (LockedStake memory locked_stake, uint256 arr_idx) {
-        require(lockedStakes[staker_address].kek_id == kek_id, "Stake not found");
-
-        locked_stake = lockedStakes[staker_address];
-        arr_idx = 0;
+        for (uint256 i = 0; i < lockedStakes[staker_address].length; i++){ 
+            if (kek_id == lockedStakes[staker_address][i].kek_id){
+                locked_stake = lockedStakes[staker_address][i];
+                arr_idx = i;
+                break;
+            }
+        }
+        require(locked_stake.kek_id == kek_id, "Stake not found");
+        
     }
 
     // Extends the lock of an existing stake
-    // function extendLockTime(bytes32 kek_id, uint256 secs) updateRewardAndBalance(msg.sender, true) public {
-    //     require(stakingPaused == false && updateStakingPaused == false && migrationsOn == false, "Staking paused or in migration");
-    //     require(block.timestamp < closed_at, "closed");
-    //     require(greylist[msg.sender] == false, "Address has been greylisted");
+    function extendLockTime(bytes32 kek_id, uint256 secs) updateRewardAndBalance(msg.sender, true) public {
+        require(stakingPaused == false && updateStakingPaused == false && migrationsOn == false, "Staking paused or in migration");
+        require(greylist[msg.sender] == false, "Address has been greylisted");
 
-    //     require(secs > 0, "Must be in the future");
-    //     require(block.timestamp + secs >= lock_end, "too short lock time");
-    //     require(migrated_user_liquidity[msg.sender] == 0, "already migrated");
+        // Get the stake and its index
+        (LockedStake memory thisStake, uint256 theArrayIndex) = _getStake(msg.sender, kek_id);
 
-    //     // Get the stake and its index
-    //     (LockedStake memory thisStake,) = _getStake(msg.sender, kek_id);
+        // Check 
+        require(secs > 0, "Must be in the future");
+        require(secs >= thisStake.ending_timestamp - thisStake.start_timestamp, "Cannot shorten lock time");
 
-    //     // Check 
-    //     require(secs >= thisStake.ending_timestamp - thisStake.start_timestamp, "Cannot shorten lock time");
+        uint256 new_ending_ts = block.timestamp + secs;
 
-    //     uint256 new_ending_ts = block.timestamp + secs;
+        // Calculate the new seconds
+        uint256 new_secs = new_ending_ts - block.timestamp;
 
-    //     // Calculate the new seconds
-    //     uint256 new_secs = new_ending_ts - block.timestamp;
+        // Update the stake
+        lockedStakes[msg.sender][theArrayIndex] = LockedStake(
+            kek_id,
+            block.timestamp,
+            thisStake.liquidity,
+            new_ending_ts,
+            boost_controller.lockMultiplier(new_secs)
+        );
 
-    //     // Update the stake
-    //     lockedStakes[msg.sender] = LockedStake(
-    //         kek_id,
-    //         block.timestamp,
-    //         thisStake.liquidity,
-    //         new_ending_ts,
-    //         boost_controller.lockMultiplier(new_secs)
-    //     );
-
-    //     // Need to call to update the combined weights
-    //     reward_comptroller.updateRewardAndBalance(msg.sender, false);
-    // }
-
+        // Need to call to update the combined weights
+        reward_comptroller.updateRewardAndBalance(msg.sender, false);
+    }
 
     // Add additional LPs to an existing locked stake
-    function _lockAdditional(bytes32 kek_id, uint256 addl_liq) updateRewardAndBalance(msg.sender, true) internal {
+    function lockAdditional(bytes32 kek_id, uint256 addl_liq) updateRewardAndBalance(msg.sender, true) public {
         require(stakingPaused == false && updateStakingPaused == false && migrationsOn == false, "Staking paused or in migration");
-        require(block.timestamp < closed_at, "closed");
         require(greylist[msg.sender] == false, "Address has been greylisted");
-        require(migrated_user_liquidity[msg.sender] == 0, "already migrated");
 
         // Checks
         require(addl_liq > 0, "Must be nonzero");
 
         // Get the stake and its index
-        (LockedStake memory thisStake, ) = _getStake(msg.sender, kek_id);
+        (LockedStake memory thisStake, uint256 theArrayIndex) = _getStake(msg.sender, kek_id);
 
         // Calculate the new amount
         uint256 new_amt = thisStake.liquidity + addl_liq;
@@ -377,7 +296,7 @@ abstract contract LpMigrationTreasury_ERC20 is ContextUpgradeable, ReentrancyGua
         TransferHelper.safeTransferFrom(lp_token_address, msg.sender, address(this), addl_liq);
 
         // Update the stake
-        lockedStakes[msg.sender] = LockedStake(
+        lockedStakes[msg.sender][theArrayIndex] = LockedStake(
             kek_id,
             thisStake.start_timestamp,
             new_amt,
@@ -386,8 +305,8 @@ abstract contract LpMigrationTreasury_ERC20 is ContextUpgradeable, ReentrancyGua
         );
 
         // Update liquidities
-        _total_liquidity_locked += addl_liq;
-        _locked_liquidity[msg.sender] += addl_liq;
+        _total_liquidity_locked = _total_liquidity_locked + addl_liq;
+        _locked_liquidity[msg.sender] = _locked_liquidity[msg.sender] + addl_liq;
 
         _onAfterStake(msg.sender, addl_liq);
 
@@ -396,14 +315,8 @@ abstract contract LpMigrationTreasury_ERC20 is ContextUpgradeable, ReentrancyGua
     }
 
     // Two different stake functions are needed because of delegateCall and msg.sender issues (important for migration)
-    function stakeLocked(uint256 liquidity) nonReentrant external {
-        // require(block.timestamp + secs >= lock_end, "too short lock time");
-
-        if (_locked_liquidity[msg.sender] == 0) {
-            _stakeLocked(msg.sender, msg.sender, liquidity, lock_end - block.timestamp, block.timestamp);
-        } else {
-            _lockAdditional(lockedStakes[msg.sender].kek_id, liquidity);
-        }
+    function stakeLocked(uint256 liquidity, uint256 secs) nonReentrant external {
+        _stakeLocked(msg.sender, msg.sender, liquidity, secs, block.timestamp);
     }
 
     // function _stakeLockedInternalLogic(
@@ -420,19 +333,12 @@ abstract contract LpMigrationTreasury_ERC20 is ContextUpgradeable, ReentrancyGua
         uint256 secs,
         uint256 start_timestamp
     ) internal updateRewardAndBalance(staker_address, true) {
-        require(block.timestamp < closed_at, "closed");
         require((stakingPaused == false && migrationsOn == false) || valid_migrators[msg.sender] == true, "Staking paused or in migration");
         require(greylist[staker_address] == false, "Address has been greylisted");
-        require(lockedStakes[staker_address].liquidity == 0, "Already have stake. use add or extend");
-        require(migrated_user_liquidity[staker_address] == 0, "already migrated");
-
-        require(liquidity > 0, "Invalid liquidity");
 
         // Get the lock multiplier and kek_id
-        uint256 lock_multiplier = secs > 0 ? boost_controller.lockMultiplier(secs) : MULTIPLIER_PRECISION;
+        uint256 lock_multiplier = !allowUnlockedStake || secs > 0 ? boost_controller.lockMultiplier(secs) : MULTIPLIER_PRECISION;
         bytes32 kek_id = keccak256(abi.encodePacked(staker_address, start_timestamp, liquidity, _locked_liquidity[staker_address]));
-
-        stakes_to_migrate_array.push(StakeMigration(staker_address, kek_id));
 
         // Pull in the required token(s)
         // Varies per farm
@@ -440,18 +346,19 @@ abstract contract LpMigrationTreasury_ERC20 is ContextUpgradeable, ReentrancyGua
         TransferHelper.safeTransferFrom(lp_token_address, source_address, address(this), liquidity);
 
         // Create the locked stake
-        lockedStakes[staker_address] = LockedStake(
+        lockedStakes[staker_address].push(LockedStake(
             kek_id,
             start_timestamp,
             liquidity,
             start_timestamp + secs,
             lock_multiplier
-        );
+        ));
 
         // Update liquidities
-        _total_liquidity_locked += liquidity;
-        _locked_liquidity[staker_address] += liquidity;
+        _total_liquidity_locked = _total_liquidity_locked + liquidity;
+        _locked_liquidity[staker_address] = _locked_liquidity[staker_address] + liquidity;
 
+        _addStaker(staker_address);
         _onAfterStake(staker_address, liquidity);
 
         // Need to call again to make sure everything is correct
@@ -463,15 +370,15 @@ abstract contract LpMigrationTreasury_ERC20 is ContextUpgradeable, ReentrancyGua
     // ------ WITHDRAWING ------
 
     // Two different withdrawLocked functions are needed because of delegateCall and msg.sender issues (important for migration)
-    function withdrawLocked() nonReentrant external {
+    function withdrawLocked(bytes32 kek_id) nonReentrant external {
         require(withdrawalsPaused == false, "Withdrawals paused");
-        _withdrawLocked(msg.sender, msg.sender, lockedStakes[msg.sender].kek_id);
+        _withdrawLocked(msg.sender, msg.sender, kek_id);
     }
 
-    function withdrawLockedFor(address account) nonReentrant external {
+    function withdrawLockedFor(address account, bytes32 kek_id) nonReentrant external {
         require(collect_reward_delegator != address(0) && collect_reward_delegator == msg.sender, "Only reward collecting delegator can perform this action");
         require(withdrawalsPaused == false, "Withdrawals paused");
-        _withdrawLocked(account, account, lockedStakes[msg.sender].kek_id);
+        _withdrawLocked(account, account, kek_id);
     }
 
     // No withdrawer == msg.sender check needed since this is only internally callable and the checks are done in the wrapper
@@ -482,10 +389,9 @@ abstract contract LpMigrationTreasury_ERC20 is ContextUpgradeable, ReentrancyGua
         bytes32 kek_id
     ) internal updateRewardAndBalance(staker_address, true) {
         _require_reward_comptroller();
-        require(migrated_user_liquidity[staker_address] == 0, "already migrated");
 
         // Get the stake and its index
-        (LockedStake memory thisStake,) = _getStake(staker_address, kek_id);
+        (LockedStake memory thisStake, uint256 theArrayIndex) = _getStake(staker_address, kek_id);
         require(block.timestamp >= thisStake.ending_timestamp || stakesUnlocked == true || valid_migrators[msg.sender] == true, "Stake is still locked!");
         uint256 liquidity = thisStake.liquidity;
 
@@ -497,9 +403,12 @@ abstract contract LpMigrationTreasury_ERC20 is ContextUpgradeable, ReentrancyGua
             _locked_liquidity[staker_address] = _locked_liquidity[staker_address] - liquidity;
 
             // Remove the stake from the array
-            delete lockedStakes[staker_address];
-
-            require(lockedStakes[staker_address].liquidity == 0);
+            delete lockedStakes[staker_address][theArrayIndex];
+            uint256 lastIndex = lockedStakes[staker_address].length - 1;
+            if (theArrayIndex != lastIndex) {
+                lockedStakes[staker_address][theArrayIndex] = lockedStakes[staker_address][lastIndex];
+            }
+            lockedStakes[staker_address].pop();
 
             // Give the tokens to the destination_address
             // Should throw if insufficient balance
@@ -510,6 +419,9 @@ abstract contract LpMigrationTreasury_ERC20 is ContextUpgradeable, ReentrancyGua
             reward_comptroller.updateRewardAndBalance(staker_address, false);
 
             emit WithdrawLocked(staker_address, liquidity, kek_id, destination_address);
+        }
+        if (lockedStakes[msg.sender].length == 0) {
+            _removeStaker(msg.sender);
         }
     }
 
@@ -559,32 +471,6 @@ abstract contract LpMigrationTreasury_ERC20 is ContextUpgradeable, ReentrancyGua
         _onSync();
     }
 
-    function _syncTotalLpWeight(uint256 syncTime) internal {
-        if (_total_liquidity_locked > 0 && totalLpWeightSyncTimestamp > 0) {
-            totalLpWeightSynced += _total_liquidity_locked * (syncTime - totalLpWeightSyncTimestamp);
-        }
-        totalLpWeightSyncTimestamp = syncTime;
-    }
-
-    // function syncTotalLpWeight() external {
-    //     uint256 syncTime = lpRewardDueTimestamp > 0 ? Math.min(lpRewardDueTimestamp, block.timestamp) : block.timestamp;
-
-    //     _syncTotalLpWeight(syncTime);
-    // }
-
-    function syncUserLpWeight(address _account) internal {
-        uint256 syncTime = lpRewardDueTimestamp > 0 ? Math.min(lpRewardDueTimestamp, block.timestamp) : block.timestamp;
-
-        _syncTotalLpWeight(syncTime);
-
-        uint256 lockedLiquidity = _locked_liquidity[_account];
-        uint256 userSyncTimestamp = userLpWeightSyncTimestamp[_account];
-        if (lockedLiquidity > 0 && userSyncTimestamp > 0) {
-            userLpWeightSynced[_account] += lockedLiquidity * (syncTime - userSyncTimestamp);
-        }
-        userLpWeightSyncTimestamp[_account] = syncTime;
-    }
-
     function _collectRewardExtraLogic(address rewardee, address destination_address) internal virtual {
         // Do nothing
     }
@@ -601,13 +487,13 @@ abstract contract LpMigrationTreasury_ERC20 is ContextUpgradeable, ReentrancyGua
         // Do nothing
     }
 
-    function _getPendingLpRewards() internal view returns (uint[] memory rewards) {
-    }
-
     // ------ MIGRATIONS ------
 
-    // Dummy method for compatibility
-    function stakerToggleMigrator(address migrator_address) external {}
+    // Staker can allow a migrator 
+    function stakerToggleMigrator(address migrator_address) external {
+        require(valid_migrators[migrator_address], "Invalid migrator address");
+        staker_allowed_migrators[msg.sender][migrator_address] = !staker_allowed_migrators[msg.sender][migrator_address]; 
+    }
 
     /* ========== RESTRICTED FUNCTIONS - Owner or timelock only ========== */
     
@@ -667,23 +553,10 @@ abstract contract LpMigrationTreasury_ERC20 is ContextUpgradeable, ReentrancyGua
         emit ToggleMigrator(migrator_address, valid_migrators[migrator_address]);
     }
 
-    function setLpRewardDue(uint256 _timestamp) external onlyByOwnGov {
-        require(migrated_liquidity == 0, "already migrated");
-        require(_timestamp >= closed_at, "due should be greater than closing time");
-        require(_timestamp >= totalLpWeightSyncTimestamp, "due should be greater than last sync timestamp");
-        lpRewardDueTimestamp = _timestamp;
-    }
+    function setAllowUnlockedStake(bool _allowUnlockedStake) external onlyByOwnGov {
+        allowUnlockedStake = _allowUnlockedStake;
 
-    function setTotalLpRewardAmount(uint256 idx, uint256 amount) external onlyByOwnGov {
-        require(migrated_liquidity == 0, "already migrated");
-
-        totalLpRewards[idx].amount = amount;
-    }
-
-    function addLpReward(address token_address, uint256 amount) external onlyByOwnGov {
-        require(migrated_liquidity == 0, "already migrated");
-
-        totalLpRewards.push(LpReward(token_address, amount));
+        emit ToggleUnlockedStakeAllowance(allowUnlockedStake);
     }
 
     // Added to support recovering possible airdrops
@@ -694,34 +567,20 @@ abstract contract LpMigrationTreasury_ERC20 is ContextUpgradeable, ReentrancyGua
         emit RecoverERC20(_token, _msgSender(), amount);
     }
 
-    /* ========== RESTRICTED FUNCTIONS - Curator / migrator callable ========== */
+     /* ========== RESTRICTED FUNCTIONS - Curator / migrator callable ========== */
 
-    // it should be migrated in order
-    function migrator_set_migrated(address staker_address, bytes32 kek_id) external {
-        require(valid_migrators[msg.sender] || msgByManager(), "Mig. invalid or unapproved");
-        require(_locked_liquidity[staker_address] > migrated_user_liquidity[staker_address], "already migrated");
-
-        StakeMigration memory migration = stakes_to_migrate_array[index_to_migrate];
-        require(migration.account == staker_address && migration.kek_id == kek_id, "invalid migration");
-
-        LpReward[] memory userLpRewards = lpRewardsFor(staker_address);
-        if (userLpRewards.length > 0) {
-            require(lpRewardDueTimestamp > 0 && block.timestamp > lpRewardDueTimestamp, "lpWeight due time");
-        }
-        for (uint i = 0; i < userLpRewards.length; i++) {
-            if (userLpRewards[i].amount > 0) {
-                TransferHelper.safeTransfer(userLpRewards[i].token_address, staker_address, userLpRewards[i].amount);
-            }
-        }
-
-        index_to_migrate++;
-
-        uint256 liquidity = lockedStakes[staker_address].liquidity;
-
-        migrated_liquidity += liquidity;
-        migrated_user_liquidity[staker_address] += liquidity;
+    // Migrator can stake for someone else (they won't be able to withdraw it back though, only staker_address can). 
+    function migrator_stakeLocked_for(address staker_address, uint256 amount, uint256 secs, uint256 start_timestamp) external {
+        require(valid_migrators[msg.sender], "Mig. invalid or unapproved");
+        _stakeLocked(staker_address, msg.sender, amount, secs, start_timestamp);
     }
-   
+
+    // Used for migrations
+    function migrator_withdraw_locked(address staker_address, bytes32 kek_id) external {
+        require(staker_allowed_migrators[staker_address][msg.sender] && valid_migrators[msg.sender], "Mig. invalid or unapproved");
+        _withdrawLocked(staker_address, msg.sender, kek_id);
+    }
+    
     /* ========== RESTRICTED FUNCTIONS - Owner or timelock only ========== */
 
     function _require_reward_comptroller() internal view {
@@ -742,4 +601,6 @@ abstract contract LpMigrationTreasury_ERC20 is ContextUpgradeable, ReentrancyGua
     event ToggleMigration(bool v);
     event ToggleMigrator(address migrator_address, bool v);
     event ToggleUnlockedStakeAllowance(bool allowUnlockedStake);
+
+    uint256[98] private __gap;
 }
