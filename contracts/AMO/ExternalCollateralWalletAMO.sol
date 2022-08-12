@@ -6,6 +6,10 @@ import "../Common/LocatorBasedProxyV2.sol";
 import "../Usdk/IAMOMinterV2.sol";
 import "../Libs/TransferHelper.sol";
 
+interface IERC20Decimals {
+    function decimals() external view returns (uint8);
+}
+
 abstract contract ExternalCollateralWalletAMO is LocatorBasedProxyV2, IAMO {
 
     /* ========== CONFIGURATION ========== */
@@ -57,14 +61,14 @@ abstract contract ExternalCollateralWalletAMO is LocatorBasedProxyV2, IAMO {
     // Call amoMinter.giveColaltToAMO() first, and call this
     function borrowCollat(address collat_address, uint256 amount) external onlyByExtWallet {
         TransferHelper.safeTransfer(collat_address, external_wallet_address, amount);
-        borrowedCollat += amount;
+        borrowedCollat += amount * 10**(18 - IERC20Decimals(collat_address).decimals());
         emit BorrowCollat(amount, borrowedCollat);
     }
 
     function returnCollat(address collat_address, uint256 amount) external onlyByExtWallet {
         TransferHelper.safeApprove(collat_address, address(amo_minter), amount);
         amo_minter.receiveCollatFromAMO(collat_address, amount);
-        returnedCollat += amount;
+        returnedCollat += amount * 10**(18 - IERC20Decimals(collat_address).decimals());
         emit ReturnCollat(amount, returnedCollat);
     }
 
@@ -86,6 +90,14 @@ abstract contract ExternalCollateralWalletAMO is LocatorBasedProxyV2, IAMO {
     function recoverERC20(address _token, uint256 amount) external onlyByManager {
         TransferHelper.safeTransfer(_token, payable(msg.sender), amount);
         emit RecoverERC20(_token, payable(msg.sender), amount);
+    }
+
+    function setBorrowedCollat(uint256 amount) external onlyByManager {
+        borrowedCollat = amount;
+    }
+
+    function setReturnedCollat(uint256 amount) external onlyByManager {
+        returnedCollat = amount;
     }
 
     // Generic proxy

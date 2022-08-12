@@ -13,6 +13,11 @@ contract TreasuryUsdkUniswapPairV5 is StakingTreasury_ERC20V5 {
     IUniswapV2Pair internal pair;
     address internal usdk_address;
 
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
     function initialize(
         address _locator_address,
         address _staking_boost_controller,

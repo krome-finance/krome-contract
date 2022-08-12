@@ -9,9 +9,9 @@ contract LpMigrationTreasuryERC20_Mock is LpMigrationTreasury_ERC20 {
         address _staking_boost_controller,
         address _staking_token,
         uint256 _closed_at,
-        uint256 _minimum_lockend
+        uint256 _lockend
     ) public initializer {
-        LpMigrationTreasury_ERC20.__LpMigrationTreasury_init(_locator_address, _staking_boost_controller, _staking_token, _closed_at, _minimum_lockend);
+        LpMigrationTreasury_ERC20.__LpMigrationTreasury_init(_locator_address, _staking_boost_controller, _staking_token, _closed_at, _lockend);
     }
 
     function usdkPerLPToken() public override pure returns (uint256) {

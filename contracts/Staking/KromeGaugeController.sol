@@ -12,7 +12,7 @@ pragma solidity ^0.8.0;
 // ======================== KromeStablecoin (USDK) =========================
 // =========================================================================
 
-import "../Common/Owned.sol";
+import "../Common/LocatorBasedProxyV2.sol";
 import "../Math/Math.sol";
 
 interface VotingEscrow {
@@ -20,14 +20,22 @@ interface VotingEscrow {
     function locked__end(address addr) external view returns (uint256);
 }
 
-contract KromeGaugeController is Owned {
+contract KromeGaugeController is LocatorBasedProxyV2 {
     // 7 * 86400 seconds - all future times are rounded by week
     uint256 private constant WEEK = 604800;
 
     // Cannot change weight votes more often than once in 10 days
     uint256 private constant WEIGHT_VOTE_DELAY = 10 * 86400;
+    // uint256 private constant WEIGHT_VOTE_DELAY = 1;
 
     uint256 private constant MULTIPLIER = 10 ** 18;
+
+    /* ========== MODIFIERS ========== */
+
+    modifier onlyByManager {
+        managerPermissionRequired();
+        _;
+    }
 
     /* ============== STRUCTURE =============== */
     struct Point {
@@ -101,12 +109,25 @@ contract KromeGaugeController is Owned {
 
     uint256 public global_emission_rate;  // inflation rate
 
+    mapping(address => bool) closed_gauge; // gauge_addr -> is_closed
+
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
     /**
-     * Contract constructor
+     * Contract initializer
      * @param _token `ERC-20 KROME` contract address
      * @param _voting_escrow `VotingEscrow` contract address
      */
-    constructor(address _token, address _voting_escrow) Owned(msg.sender) {
+    function initialize(
+        address _locator_address,
+        address _token,
+        address _voting_escrow
+    ) public initializer {
+        LocatorBasedProxyV2.initializeLocatorBasedProxy(_locator_address);
+
         require(_token != address(0), "token address is empty");
         require(_voting_escrow != address(0), "voting escrow is empty");
 
@@ -309,12 +330,17 @@ contract KromeGaugeController is Owned {
         emit NewGauge(addr, gauge_type, weight);
     }
 
-    function add_gauge(address addr, int128 gauge_type, uint256 weight) external onlyOwner {
+    function add_gauge(address addr, int128 gauge_type, uint256 weight) external onlyByManager {
         _add_gauge(addr, gauge_type, weight);
     }
 
-    function add_gauge(address addr, int128 gauge_type) external onlyOwner {
+    function add_gauge(address addr, int128 gauge_type) external onlyByManager {
         _add_gauge(addr, gauge_type, 0);
+    }
+
+    function set_closed_gauge(address addr, bool v) external onlyByManager {
+        require(gauge_types_[addr] > 0, "unknown gauge");
+        closed_gauge[addr] = v;
     }
 
     /**
@@ -427,11 +453,11 @@ contract KromeGaugeController is Owned {
         }
     }
 
-    function add_type(string calldata _name, uint256 weight) external onlyOwner {
+    function add_type(string calldata _name, uint256 weight) external onlyByManager {
         _add_type(_name, weight);
     }
 
-    function add_type(string calldata _name) external onlyOwner {
+    function add_type(string calldata _name) external onlyByManager {
         _add_type(_name, 0);
     }
 
@@ -440,7 +466,7 @@ contract KromeGaugeController is Owned {
      * @param type_id Gauge type id
      * @param weight New Gauge weight
      */
-    function change_type_weight(int128 type_id, uint256 weight) external onlyOwner {
+    function change_type_weight(int128 type_id, uint256 weight) external onlyByManager {
         _change_type_weight(type_id, weight);
     }
 
@@ -475,7 +501,7 @@ contract KromeGaugeController is Owned {
      * @param addr `GaugeController` contract address
      * @param weight New Gauge weight
      */
-    function change_gauge_weight(address addr, uint256 weight) external onlyOwner {
+    function change_gauge_weight(address addr, uint256 weight) external onlyByManager {
         _change_gauge_weight(addr, weight);
     }
 
@@ -499,7 +525,8 @@ contract KromeGaugeController is Owned {
             next_time = (block.timestamp + WEEK) / WEEK * WEEK;
             require(lock_end > next_time, "Your token lock expires too soon");
             require((_user_weight >= 0) && (_user_weight <= 10000), "You used all your voting power");
-            require(block.timestamp >= last_user_vote[msg.sender][_gauge_addr] + WEIGHT_VOTE_DELAY, "Cannot vote so often");
+            require(closed_gauge[_gauge_addr] || block.timestamp >= last_user_vote[msg.sender][_gauge_addr] + WEIGHT_VOTE_DELAY, "Cannot vote so often");
+            require(!closed_gauge[_gauge_addr] || _user_weight == 0, "weight should be 0 for closed gauge");
 
             gauge_type = gauge_types_[_gauge_addr] - 1;
             require(gauge_type >= 0, "Gauge not added");
@@ -592,12 +619,44 @@ contract KromeGaugeController is Owned {
     }
 
     /**
+     * Get current user weight of gauge voted
+     * @return Total weight
+     */
+    function get_user_gauge_weight(address _user, address _gauge_addr) external view returns(uint256) {
+        VotedSlope memory voted_slope = vote_user_slopes[_user][_gauge_addr];
+        uint256 t = time_weight[_gauge_addr];
+        if (voted_slope.end <= time_weight[_gauge_addr]) {
+            return 0;
+        } else {
+            return voted_slope.slope * (voted_slope.end - t);
+        }
+    }
+
+    /**
+     * Get current available user weight of gauge for current escrow balance
+     * @return Total weight
+     */
+    function get_available_user_gauge_weight(address _user, address _gauge_addr) external view returns(uint256) {
+        address escrow_ = voting_escrow;
+        uint256 slope = uint256(safe_uint128(VotingEscrow(escrow_).get_last_user_slope(_user)));
+        uint256 lock_end = VotingEscrow(escrow_).locked__end(_user);
+
+        VotedSlope memory voted_slope = vote_user_slopes[_user][_gauge_addr];
+
+        uint256 t = time_weight[_gauge_addr];
+        if (lock_end <= time_weight[_gauge_addr]) {
+            return 0;
+        } else {
+            return (slope * voted_slope.power / 10000) * (lock_end - t);
+        }
+    }
+
+    /**
      * Get sum of gauge weights per type
      * @param type_id Type id
      * @return Sum of gauge weights
      */
     function get_weights_sum_per_type(int128 type_id) external view returns(uint256) {
-
         return points_sum[type_id][time_sum[type_id]].bias;
     }
 
@@ -605,10 +664,17 @@ contract KromeGaugeController is Owned {
      * Change KROME emission rate
      * @param new_rate new emission rate (FXS per second)
      */
-    function change_global_emission_rate(uint256 new_rate) external onlyOwner {
+    function change_global_emission_rate(uint256 new_rate) external onlyByManager {
         global_emission_rate = new_rate;
 
         emit GlobalEmissionRate(new_rate);
+    }
+
+    function all_gauges() external view returns(address[] memory gauges_array) {
+        gauges_array = new address[](uint256(int256(n_gauges)));
+        for (uint128 i = 0; i < uint128(n_gauges); i++) {
+            gauges_array[i] = (gauges[i]);
+        }
     }
 
     function safe_uint128(int128 v) internal pure returns(uint128) {

@@ -8,12 +8,13 @@ import "../External/Kleva/IKlevaIBToken.sol";
 import "../External/Kleva/IKlevaStakePool.sol";
 import "../External/Kokoa/IKokoaLedger.sol";
 import "../External/Kokoa/IKokoaBond.sol";
+import "../External/Kokonutswap/IKokonutPool.sol";
 import "../ERC20/ERC20.sol";
 import "../Usdk/IUsdk.sol";
 
 contract ExternalKUSDTWalletAMO is ExternalCollateralWalletAMO {
     uint256 constant public IBTOKEN_PRICE_PRECISTION = 1e9;
-    uint256 constant public MISSING_PRECISION = 1e12;
+    // uint256 constant public MISSING_PRECISION = 1e12;
     IKokoaLedger constant public kokoaLedger = IKokoaLedger(0x1242ECA3F543699173d1fAEc299552fAb65E0924);
 
     struct Token {
@@ -54,6 +55,12 @@ contract ExternalKUSDTWalletAMO is ExternalCollateralWalletAMO {
         uint8 decimals;
     }
 
+    struct KokonutPool {
+        address lp_address;
+        address swap_pool;
+        address staking;
+    }
+
     struct KokoaValue {
         bytes32 collateral_type;
         uint256 amount;
@@ -61,6 +68,11 @@ contract ExternalKUSDTWalletAMO is ExternalCollateralWalletAMO {
 
     struct BridgedValue {
         bytes32 where;
+        uint256 amount;
+    }
+
+    struct KokonutValue {
+        address lp_address;
         uint256 amount;
     }
 
@@ -84,6 +96,14 @@ contract ExternalKUSDTWalletAMO is ExternalCollateralWalletAMO {
     mapping(bytes32 => uint256) bridged_collateral_order;
     uint256 public bridged_value_stored;
 
+    // addded 2022.08
+    address public dKSD_address;
+
+    // added 2022.08.11
+    KokonutPool[] public kokonut_pools;
+    mapping(address => uint256) kokonut_pool_order; // lp_address => order
+    uint256 public kokonut_value_stored;
+
     /* ========== INITIALIZER ========== */
 
     function initialize(
@@ -92,7 +112,7 @@ contract ExternalKUSDTWalletAMO is ExternalCollateralWalletAMO {
         address _external_wallet
     ) public initializer {
         ExternalCollateralWalletAMO.initializeExternalWalletAMO(_locator_address, _amo_minter, _external_wallet);
-        require(10 ** amo_minter.missing_decimals() == MISSING_PRECISION, "Invalid missing decimals");
+        // require(10 ** amo_minter.missing_decimals() == MISSING_PRECISION, "Invalid missing decimals");
     }
 
     /* ========== FINANCIAL VIEW ========== */
@@ -129,11 +149,19 @@ contract ExternalKUSDTWalletAMO is ExternalCollateralWalletAMO {
         return kokoa_bonds;
     }
 
+    function kokonut_pools_length() external view returns (uint256) {
+        return kokonut_pools.length;
+    }
+
+    function getKokonutPools() external view returns (KokonutPool[] memory) {
+        return kokonut_pools;
+    }
+
     function dollarBalances() external view returns (uint256 usdk_val_e18, uint256 collat_val_e18) {
         usdk_val_e18 = 0;
 
         // only CR portion of borrowed USDK is considered as collateral
-        collat_val_e18 = tokens_value_stored + eklipse_value_stored + kleva_value_stored + kokoa_value_stored + bridged_value_stored;
+        collat_val_e18 = tokens_value_stored + eklipse_value_stored + kleva_value_stored + kokoa_value_stored + kokonut_value_stored + bridged_value_stored ;
     }
 
     function _token_value(Token memory _entry) internal view returns (uint256) {
@@ -233,13 +261,51 @@ contract ExternalKUSDTWalletAMO is ExternalCollateralWalletAMO {
         for (uint i = 0; i < kokoa_bonds.length; i++) {
             value += _kokoa_bond_value(kokoa_bonds[i]);
         }
+        if (dKSD_address != address(0)) {
+            uint8 dksd_decimals = ERC20(dKSD_address).decimals();
+            value += IERC20(dKSD_address).balanceOf(external_wallet_address) * (10 ** (18 - dksd_decimals));
+        }
     }
 
     function kokoa_values() external view returns (KokoaValue[] memory values) {
-        values = new KokoaValue[](kokoa_bonds.length);
-        for (uint i = 0; i < kokoa_bonds.length; i++) {
+        values = new KokoaValue[](kokoa_bonds.length + 1);
+        uint i = 0;
+        for (; i < kokoa_bonds.length; i++) {
             values[i].collateral_type = kokoa_bonds[i].collateral_type;
             values[i].amount = _kokoa_bond_value(kokoa_bonds[i]);
+        }
+        if (dKSD_address != address(0)) {
+            values[i].collateral_type = bytes32(0);
+
+            uint8 dksd_decimals = ERC20(dKSD_address).decimals();
+            values[i].amount = IERC20(dKSD_address).balanceOf(external_wallet_address) * (10 ** (18 - dksd_decimals));
+        }
+    }
+
+    function _kokonut_pool_value(KokonutPool memory _entry) internal view returns (uint256) {
+        ERC20 lp = ERC20(_entry.lp_address);
+        IKokonutPool pool = IKokonutPool(_entry.swap_pool);
+        ERC20 staking = ERC20(_entry.staking);
+        uint8 lp_decimals = lp.decimals();
+
+        uint256 value = 0;
+        value += lp.balanceOf(external_wallet_address);
+        value += staking.balanceOf(external_wallet_address);
+
+        return value * (10 ** (18 - lp_decimals)) * pool.getVirtualPrice() / 1e18;
+    }
+
+    function kokonut_value() public view returns (uint256 value) {
+        for (uint i = 0; i < kokonut_pools.length; i++) {
+            value += _kokonut_pool_value(kokonut_pools[i]);
+        }
+    }
+
+    function kokonut_values() external view returns (KokonutValue[] memory values) {
+        values = new KokonutValue[](kokonut_pools.length);
+        for (uint i = 0; i < kokonut_pools.length; i++) {
+            values[i].lp_address = kokonut_pools[i].lp_address;
+            values[i].amount = _kokonut_pool_value(kokonut_pools[i]);
         }
     }
 
@@ -271,6 +337,10 @@ contract ExternalKUSDTWalletAMO is ExternalCollateralWalletAMO {
         kokoa_value_stored = kokoa_value();
     }
 
+    function syncKokonut() internal {
+        kokonut_value_stored = kokonut_value();
+    }
+
     function syncBridgedValue() internal {
         bridged_value_stored = bridged_value();
     }
@@ -280,6 +350,7 @@ contract ExternalKUSDTWalletAMO is ExternalCollateralWalletAMO {
         syncEklipse();
         syncKleva();
         syncKokoa();
+        syncKokonut();
         syncBridgedValue();
     }
 
@@ -351,6 +422,27 @@ contract ExternalKUSDTWalletAMO is ExternalCollateralWalletAMO {
         }
         kokoa_bonds.pop();
         kokoa_bond_order[collateral_type] = 0;
+    }
+
+    function addKokonutPool(address lp_address, address swap_pool, address staking) external onlyByManager {
+        require(kokonut_pool_order[lp_address] == 0, "duplicated lp");
+        kokonut_pools.push(KokonutPool(lp_address, swap_pool, staking));
+        kokonut_pool_order[lp_address] = kokonut_pools.length;
+    }
+
+    function removeKokonutPool(address lp_address) external onlyByManager {
+        require(kokonut_pool_order[lp_address] > 0, "unknown lp");
+        uint256 order = kokonut_pool_order[lp_address];
+        if (order < kokonut_pools.length) {
+            kokonut_pools[order - 1] = kokonut_pools[kokonut_pools.length - 1];
+            kokonut_pool_order[kokonut_pools[order - 1].lp_address] = order;
+        }
+        kokonut_pools.pop();
+        kokonut_pool_order[lp_address] = 0;
+    }
+
+    function setDepositedKSD(address _dksd_address) external onlyByManager {
+        dKSD_address = _dksd_address;
     }
 
     function setBridgedValue(bytes32 _where, uint256 _value) external onlyByManager {

@@ -4,7 +4,7 @@ pragma solidity ^0.8.0;
 import "../External/Claimswap/IUniswapV2Router02.sol";
 
 // it should have no state variables!! called by delegatecall
-contract ClaimswapHelper {
+contract UniswapSwapHelper {
     address public immutable claimswap_router;
 
     constructor(

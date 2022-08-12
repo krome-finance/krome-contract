@@ -698,10 +698,6 @@ abstract contract LpMigrationTreasury_ERC20 is ContextUpgradeable, ReentrancyGua
         emit RecoverERC20(_token, _msgSender(), amount);
     }
 
-    function setClosedAt(uint256 timestamp) external onlyByOwnGov {
-        closed_at = timestamp;
-    }
-
     /* ========== RESTRICTED FUNCTIONS - Curator / migrator callable ========== */
 
     // it should be migrated in order
@@ -750,4 +746,6 @@ abstract contract LpMigrationTreasury_ERC20 is ContextUpgradeable, ReentrancyGua
     event ToggleMigration(bool v);
     event ToggleMigrator(address migrator_address, bool v);
     event ToggleUnlockedStakeAllowance(bool allowUnlockedStake);
+
+    uint256[100] private __gap;
 }

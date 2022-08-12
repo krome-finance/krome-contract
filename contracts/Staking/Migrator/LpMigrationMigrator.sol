@@ -63,6 +63,11 @@ contract LpMigrationMigrator is LocatorBasedProxyV2 {
  
     /* ========== CONSTRUCTOR ========== */
 
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
     function initialize (
         address _locator
     ) external initializer {
@@ -188,7 +193,7 @@ contract LpMigrationMigrator is LocatorBasedProxyV2 {
         total_source_lp_liquidities[_treasury_from_address] = source_amount;
         total_migrated_lp_liquidities[_treasury_from_address] = migrated_amount;
 
-        TransferHelper.safeTransferFrom(lp, msg.sender, address(this), migrated_amount);
+        // TransferHelper.safeTransferFrom(lp, msg.sender, address(this), migrated_amount);
 
         emit SetMigratedLp(_treasury_from_address, source_amount, migrated_amount);
     }
